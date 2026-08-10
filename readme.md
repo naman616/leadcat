@@ -14,7 +14,7 @@ This project uses a high-performance stack designed to eliminate re-render lag a
 * **Backend & Database:** [Supabase](https://supabase.com/) (Serverless Postgres + Row-Level Security)
 * **Automated Ingestion:** Supabase Edge Functions (Deno / TypeScript)
 * **Developer Agent:** Claude Code CLI (Guided via strict `CLAUDE.md` performance rules)
-* **Hosting:** Vercel / Cloudflare Pages ($0 Free Tier)
+* **Hosting:** Vercel / Cloudflare Pages ($0 Free Tier) lets see
 
 ---
 
