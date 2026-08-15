@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Dummy values so Prisma schema parsing has something to resolve —
+      # never actually connected to in CI. The real, live connection is
+      # TEST_DATABASE_URL, pointed at the throwaway service container above.
+      DATABASE_URL: "postgresql://unused:unused@localhost:5432/unused"
+      DIRECT_URL: "postgresql://unused:unused@localhost:5432/unused"
+      TEST_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Generate Prisma Client
+        run: bun run db:generate
+
+      - name: Apply test schema (bootstrap + migrations) to throwaway Postgres
+        run: bun run test:db:setup
+
+      - name: Run tenant-isolation test
+        run: bun run test
