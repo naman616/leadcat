@@ -112,21 +112,32 @@ function ReportsPage() {
             <table className="w-full min-w-[1000px] border-collapse text-sm">
               <thead>
                 <tr className="bg-table-head text-table-head-foreground">
-                  {["User Name", "Working Hours", "Calls", "WhatsApp", "Email", "SMS", "Status Edits", "Form Edits", "Notes"].map(
-                    (h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
+                  {[
+                    "User Name",
+                    "Working Hours",
+                    "Calls",
+                    "WhatsApp",
+                    "Email",
+                    "SMS",
+                    "Status Edits",
+                    "Form Edits",
+                    "Notes",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.user} className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70">
+                  <tr
+                    key={r.user}
+                    className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70"
+                  >
                     <td className="px-4 py-3">
                       <p className="flex items-center gap-2 font-semibold">
                         <span
@@ -137,12 +148,16 @@ function ReportsPage() {
                         />
                         {r.user}
                       </p>
-                      <p className="pl-4 text-xs text-muted-foreground">{r.active ? "Active" : "Inactive"}</p>
+                      <p className="pl-4 text-xs text-muted-foreground">
+                        {r.active ? "Active" : "Inactive"}
+                      </p>
                     </td>
                     <td className="px-4 py-3 tabular-nums">{r.workingHours}</td>
                     <td className="px-4 py-3">
                       <p className="font-semibold tabular-nums">{r.calls || "--"}</p>
-                      <p className="text-xs text-muted-foreground">unique: {r.uniqueCalls || "--"}</p>
+                      <p className="text-xs text-muted-foreground">
+                        unique: {r.uniqueCalls || "--"}
+                      </p>
                     </td>
                     <td className="px-4 py-3 tabular-nums">{r.whatsapp || "--"}</td>
                     <td className="px-4 py-3 tabular-nums">{r.email || "--"}</td>

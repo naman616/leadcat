@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled connection (pgbouncer, port 6543) — the app always talks to this
+  // one at runtime.
+  url       = env("DATABASE_URL")
+  // Direct connection (port 5432) — Prisma Migrate uses this one, since
+  // migrations need session-level features pgbouncer's transaction mode
+  // doesn't support. Never swap these two.
+  directUrl = env("DIRECT_URL")
+}
+
+/// One row per tenant. Every tenant-scoped table's org_id points here.
+model Organization {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+
+  members OrgMember[]
+
+  @@map("organizations")
+}
+
+/// Mirrors auth.users (Supabase Auth owns real credentials). id is set to
+/// the same value as auth.users.id by a trigger on signup — see the RLS/
+/// setup migration, not a Prisma-managed relation, since auth.users lives
+/// outside Prisma's schema.
+model User {
+  id        String   @id @db.Uuid
+  email     String
+  fullName  String?  @map("full_name")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  memberships OrgMember[]
+
+  @@map("users")
+}
+
+enum OrgRole {
+  owner
+  admin
+  agent
+  cp_admin
+  cp_agent
+
+  @@map("org_role")
+}
+
+/// Which orgs a user belongs to, and with what role. A user can belong to
+/// more than one org (e.g. a channel-partner agent working two developers),
+/// so this is its own table rather than a column on User.
+model OrgMember {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      OrgRole
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@map("org_members")
+}

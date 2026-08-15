@@ -1,4 +1,4 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   Settings2,
@@ -15,9 +15,22 @@ import {
   Search,
   ChevronsLeft,
   Plus,
+  UserRound,
+  LogOut,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { currentUser } from "@/data/crm";
+import { toast } from "sonner";
+import { signOut } from "@/lib/auth.server";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const nav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -44,6 +57,17 @@ export function AppShell({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const navigate = useNavigate();
+
+  async function handleLogOut() {
+    try {
+      await signOut();
+      toast.success("Logged out");
+      void navigate({ to: "/sign-in" });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Log out failed");
+    }
+  }
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -94,7 +118,9 @@ export function AppShell({
             aria-label="Toggle sidebar"
             className="rounded-md p-1.5 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           >
-            <ChevronsLeft className={cn("size-4 transition-transform", collapsed && "rotate-180")} />
+            <ChevronsLeft
+              className={cn("size-4 transition-transform", collapsed && "rotate-180")}
+            />
           </button>
         </div>
       </aside>
@@ -117,12 +143,45 @@ export function AppShell({
               <Bell className="size-[18px]" />
               <span className="absolute right-2 top-2 size-1.5 rounded-full bg-destructive" />
             </button>
-            <div className="flex items-center gap-2 pl-1">
-              <span className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
-                JT
-              </span>
-              <span className="text-sm font-medium">Jatin</span>
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="flex items-center gap-2 rounded-full pl-1 pr-2 py-1 transition-colors hover:bg-secondary">
+                  <span className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                    {initials(currentUser.name)}
+                  </span>
+                  <span className="text-sm font-medium">{currentUser.name.split(" ")[0]}</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel>
+                  <p className="text-sm font-semibold">{currentUser.name}</p>
+                  <p className="text-xs font-normal text-muted-foreground">{currentUser.email}</p>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link to="/profile" className="flex cursor-pointer items-center gap-2">
+                    <UserRound className="size-4" /> View Profile
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() =>
+                    toast("Settings", {
+                      description: "Account settings are managed from your profile page.",
+                    })
+                  }
+                  className="flex cursor-pointer items-center gap-2"
+                >
+                  <Settings2 className="size-4" /> Settings
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => void handleLogOut()}
+                  className="flex cursor-pointer items-center gap-2 text-destructive focus:text-destructive"
+                >
+                  <LogOut className="size-4" /> Log out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </header>
 
@@ -130,6 +189,11 @@ export function AppShell({
       </div>
     </div>
   );
+}
+
+export function initials(name: string) {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase();
 }
 
 export function PrimaryAction({ label, onClick }: { label: string; onClick?: () => void }) {

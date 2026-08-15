@@ -19,13 +19,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { AppShell } from "@/components/crm/AppShell";
-import {
-  activityTiles,
-  dashboardStats,
-  funnel,
-  leadSources,
-  leadTrend,
-} from "@/data/crm";
+import { activityTiles, dashboardStats, funnel, leadSources, leadTrend } from "@/data/crm";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -173,10 +167,34 @@ function Dashboard() {
                       boxShadow: "var(--shadow-card)",
                     }}
                   />
-                  <Area type="monotone" dataKey="facebook" stroke="var(--chart-2)" fill="url(#fb)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="google" stroke="var(--chart-3)" fill="url(#gg)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="portals" stroke="var(--chart-1)" fill="url(#pt)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="walkin" stroke="var(--chart-5)" fill="url(#wi)" strokeWidth={2} />
+                  <Area
+                    type="monotone"
+                    dataKey="facebook"
+                    stroke="var(--chart-2)"
+                    fill="url(#fb)"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="google"
+                    stroke="var(--chart-3)"
+                    fill="url(#gg)"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="portals"
+                    stroke="var(--chart-1)"
+                    fill="url(#pt)"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="walkin"
+                    stroke="var(--chart-5)"
+                    fill="url(#wi)"
+                    strokeWidth={2}
+                  />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

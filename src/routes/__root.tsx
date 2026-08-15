@@ -79,10 +79,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Estatly — Real Estate CRM" },
-      { name: "description", content: "A fast real estate CRM for lead, project and sales-team management." },
+      {
+        name: "description",
+        content: "A fast real estate CRM for lead, project and sales-team management.",
+      },
       { name: "author", content: "Lovable" },
       { property: "og:title", content: "Estatly — Real Estate CRM" },
-      { property: "og:description", content: "Leads, projects, reports and configuration in one seamless CRM." },
+      {
+        property: "og:description",
+        content: "Leads, projects, reports and configuration in one seamless CRM.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },

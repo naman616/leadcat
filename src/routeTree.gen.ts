@@ -15,9 +15,12 @@ import { Route as DataRouteImport } from './routes/data'
 import { Route as GlobalConfigRouteImport } from './routes/global-config'
 import { Route as InvoiceRouteImport } from './routes/invoice'
 import { Route as LeadsRouteImport } from './routes/leads'
+import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as PropertiesRouteImport } from './routes/properties'
 import { Route as ReportsRouteImport } from './routes/reports'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as TasksRouteImport } from './routes/tasks'
 import { Route as TeamRouteImport } from './routes/team'
 
@@ -51,6 +54,11 @@ const LeadsRoute = LeadsRouteImport.update({
   path: '/leads',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProjectsRoute = ProjectsRouteImport.update({
   id: '/projects',
   path: '/projects',
@@ -64,6 +72,16 @@ const PropertiesRoute = PropertiesRouteImport.update({
 const ReportsRoute = ReportsRouteImport.update({
   id: '/reports',
   path: '/reports',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignInRoute = SignInRouteImport.update({
+  id: '/sign-in',
+  path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignUpRoute = SignUpRouteImport.update({
+  id: '/sign-up',
+  path: '/sign-up',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TasksRoute = TasksRouteImport.update({
@@ -84,9 +102,12 @@ export interface FileRoutesByFullPath {
   '/global-config': typeof GlobalConfigRoute
   '/invoice': typeof InvoiceRoute
   '/leads': typeof LeadsRoute
+  '/profile': typeof ProfileRoute
   '/projects': typeof ProjectsRoute
   '/properties': typeof PropertiesRoute
   '/reports': typeof ReportsRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/tasks': typeof TasksRoute
   '/team': typeof TeamRoute
 }
@@ -97,9 +118,12 @@ export interface FileRoutesByTo {
   '/global-config': typeof GlobalConfigRoute
   '/invoice': typeof InvoiceRoute
   '/leads': typeof LeadsRoute
+  '/profile': typeof ProfileRoute
   '/projects': typeof ProjectsRoute
   '/properties': typeof PropertiesRoute
   '/reports': typeof ReportsRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/tasks': typeof TasksRoute
   '/team': typeof TeamRoute
 }
@@ -111,9 +135,12 @@ export interface FileRoutesById {
   '/global-config': typeof GlobalConfigRoute
   '/invoice': typeof InvoiceRoute
   '/leads': typeof LeadsRoute
+  '/profile': typeof ProfileRoute
   '/projects': typeof ProjectsRoute
   '/properties': typeof PropertiesRoute
   '/reports': typeof ReportsRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/tasks': typeof TasksRoute
   '/team': typeof TeamRoute
 }
@@ -126,9 +153,12 @@ export interface FileRouteTypes {
     | '/global-config'
     | '/invoice'
     | '/leads'
+    | '/profile'
     | '/projects'
     | '/properties'
     | '/reports'
+    | '/sign-in'
+    | '/sign-up'
     | '/tasks'
     | '/team'
   fileRoutesByTo: FileRoutesByTo
@@ -139,9 +169,12 @@ export interface FileRouteTypes {
     | '/global-config'
     | '/invoice'
     | '/leads'
+    | '/profile'
     | '/projects'
     | '/properties'
     | '/reports'
+    | '/sign-in'
+    | '/sign-up'
     | '/tasks'
     | '/team'
   id:
@@ -152,9 +185,12 @@ export interface FileRouteTypes {
     | '/global-config'
     | '/invoice'
     | '/leads'
+    | '/profile'
     | '/projects'
     | '/properties'
     | '/reports'
+    | '/sign-in'
+    | '/sign-up'
     | '/tasks'
     | '/team'
   fileRoutesById: FileRoutesById
@@ -166,9 +202,12 @@ export interface RootRouteChildren {
   GlobalConfigRoute: typeof GlobalConfigRoute
   InvoiceRoute: typeof InvoiceRoute
   LeadsRoute: typeof LeadsRoute
+  ProfileRoute: typeof ProfileRoute
   ProjectsRoute: typeof ProjectsRoute
   PropertiesRoute: typeof PropertiesRoute
   ReportsRoute: typeof ReportsRoute
+  SignInRoute: typeof SignInRoute
+  SignUpRoute: typeof SignUpRoute
   TasksRoute: typeof TasksRoute
   TeamRoute: typeof TeamRoute
 }
@@ -217,6 +256,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LeadsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/projects': {
       id: '/projects'
       path: '/projects'
@@ -236,6 +282,20 @@ declare module '@tanstack/react-router' {
       path: '/reports'
       fullPath: '/reports'
       preLoaderRoute: typeof ReportsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-up': {
+      id: '/sign-up'
+      path: '/sign-up'
+      fullPath: '/sign-up'
+      preLoaderRoute: typeof SignUpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/tasks': {
@@ -262,9 +322,12 @@ const rootRouteChildren: RootRouteChildren = {
   GlobalConfigRoute: GlobalConfigRoute,
   InvoiceRoute: InvoiceRoute,
   LeadsRoute: LeadsRoute,
+  ProfileRoute: ProfileRoute,
   ProjectsRoute: ProjectsRoute,
   PropertiesRoute: PropertiesRoute,
   ReportsRoute: ReportsRoute,
+  SignInRoute: SignInRoute,
+  SignUpRoute: SignUpRoute,
   TasksRoute: TasksRoute,
   TeamRoute: TeamRoute,
 }

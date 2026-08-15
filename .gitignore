@@ -16,6 +16,11 @@ dist-ssr
 .nitro
 *.local
 
+# Secrets — never commit real connection strings or API keys
+.env
+.env.*
+!.env.example
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

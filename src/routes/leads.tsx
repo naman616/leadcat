@@ -17,9 +17,38 @@ import {
   X,
 } from "lucide-react";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
-import { leads, statusTone, type Lead } from "@/data/crm";
+import {
+  leads as seedLeads,
+  statusTone,
+  teamMembers,
+  leadBudgets,
+  leadRequirements,
+  leadCities,
+  leadSourceNames,
+  leadProjectNames,
+  type Lead,
+  type LeadStatus,
+} from "@/data/crm";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export const Route = createFileRoute("/leads")({
   head: () => ({
@@ -33,23 +62,56 @@ export const Route = createFileRoute("/leads")({
       { property: "og:title", content: "Manage Leads — Estatly Real Estate CRM" },
       {
         property: "og:description",
-        content: "A fast lead workspace for real estate sales teams with instant preview and actions.",
+        content:
+          "A fast lead workspace for real estate sales teams with instant preview and actions.",
       },
     ],
   }),
   component: LeadsPage,
 });
 
-const tabs = ["All", "My Leads", "Team's", "Unassigned", "Deleted", "Duplicate", "Re Enquired"] as const;
-const statusFilters = ["All", "New", "Callback", "Follow Up", "Site Visit", "Booked", "Dropped"] as const;
+const tabs = [
+  "All",
+  "My Leads",
+  "Team's",
+  "Unassigned",
+  "Deleted",
+  "Duplicate",
+  "Re Enquired",
+] as const;
+const statusFilters = [
+  "All",
+  "New",
+  "Callback",
+  "Follow Up",
+  "Site Visit",
+  "Booked",
+  "Dropped",
+] as const;
+
+const emptyDraft = {
+  name: "",
+  phone: "",
+  email: "",
+  source: "",
+  subSource: "",
+  project: "",
+  budget: "",
+  requirement: "",
+  city: "",
+  assigned: "",
+};
 
 function LeadsPage() {
+  const [leads, setLeads] = useState<Lead[]>(seedLeads);
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [status, setStatus] = useState<(typeof statusFilters)[number]>("All");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [preview, setPreview] = useState<Lead | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [draft, setDraft] = useState(emptyDraft);
   const perPage = 10;
 
   const filtered = useMemo(() => {
@@ -68,17 +130,68 @@ function LeadsPage() {
         l.source.toLowerCase().includes(q)
       );
     });
-  }, [tab, status, query]);
+  }, [leads, tab, status, query]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / perPage));
   const current = Math.min(page, pageCount);
   const rows = filtered.slice((current - 1) * perPage, current * perPage);
   const allChecked = rows.length > 0 && rows.every((r) => selected.includes(r.id));
 
+  function submitLead(e: React.FormEvent) {
+    e.preventDefault();
+    if (!draft.name.trim() || !draft.phone.trim() || !draft.source || !draft.project) {
+      toast.error("Please fill in name, phone, source and project");
+      return;
+    }
+    const now = new Date();
+    const stamp = now.toLocaleDateString("en-GB").replaceAll("/", "-");
+    const lead: Lead = {
+      id: `LD-${1000 + leads.length + Math.floor(Math.random() * 900)}`,
+      name: draft.name.trim(),
+      phone: draft.phone.trim(),
+      email: draft.email.trim() || `${draft.name.trim().split(" ")[0]!.toLowerCase()}@example.com`,
+      assigned: draft.assigned || "Unassigned",
+      source: draft.source,
+      subSource: draft.subSource.trim() || "manual entry",
+      status: "New" as LeadStatus,
+      subStatus: "awaiting first call",
+      project: draft.project,
+      budget: draft.budget || "—",
+      requirement: draft.requirement || "—",
+      city: draft.city || "—",
+      createdAt: stamp,
+      nextAction: "Not scheduled",
+      notes: [],
+      history: [
+        {
+          at: `${stamp} ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`,
+          by: "System",
+          action: "Lead created",
+        },
+      ],
+    };
+    setLeads((prev) => [lead, ...prev]);
+    setTab("All");
+    setStatus("All");
+    setQuery("");
+    setPage(1);
+    setDraft(emptyDraft);
+    setAddOpen(false);
+    toast.success(`${lead.name} added as a new lead`);
+  }
+
   return (
     <AppShell
       title="Manage Leads"
-      actions={<PrimaryAction label="Add Lead" onClick={() => toast.success("Add lead form opened")} />}
+      actions={
+        <PrimaryAction
+          label="Add Lead"
+          onClick={() => {
+            setDraft(emptyDraft);
+            setAddOpen(true);
+          }}
+        />
+      }
     >
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border bg-card p-1.5">
@@ -130,7 +243,11 @@ function LeadsPage() {
               ))}
             </select>
             <button
-              onClick={() => toast("Filter panel", { description: "Advanced filters coming from your saved views." })}
+              onClick={() =>
+                toast("Filter panel", {
+                  description: "Advanced filters coming from your saved views.",
+                })
+              }
               className="inline-flex h-10 items-center gap-2 rounded-lg border border-input px-3.5 text-sm font-medium transition-colors hover:bg-secondary"
             >
               <Filter className="size-4" /> Filter
@@ -146,7 +263,9 @@ function LeadsPage() {
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5 text-xs">
             <Chip label={`Leads: ${filtered.length}`} />
             <Chip label={`View: ${tab}`} />
-            {status !== "All" && <Chip label={`Status: ${status}`} onClear={() => setStatus("All")} />}
+            {status !== "All" && (
+              <Chip label={`Status: ${status}`} onClear={() => setStatus("All")} />
+            )}
             {query && <Chip label={`Search: ${query}`} onClear={() => setQuery("")} />}
             {selected.length > 0 && (
               <span className="ml-auto flex items-center gap-2 font-medium text-primary">
@@ -170,9 +289,7 @@ function LeadsPage() {
                       type="checkbox"
                       aria-label="Select all"
                       checked={allChecked}
-                      onChange={(e) =>
-                        setSelected(e.target.checked ? rows.map((r) => r.id) : [])
-                      }
+                      onChange={(e) => setSelected(e.target.checked ? rows.map((r) => r.id) : [])}
                       className="size-4 accent-[oklch(0.68_0.11_178)]"
                     />
                   </Th>
@@ -220,7 +337,9 @@ function LeadsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <p className="font-medium">{l.source}</p>
-                      <p className="max-w-[180px] truncate text-xs text-muted-foreground">{l.subSource}</p>
+                      <p className="max-w-[180px] truncate text-xs text-muted-foreground">
+                        {l.subSource}
+                      </p>
                     </td>
                     <td className="px-4 py-3">
                       <p className={cn("font-semibold", statusTone[l.status])}>{l.status}</p>
@@ -257,7 +376,10 @@ function LeadsPage() {
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-16 text-center text-sm text-muted-foreground">
+                    <td
+                      colSpan={7}
+                      className="px-4 py-16 text-center text-sm text-muted-foreground"
+                    >
                       No leads match these filters.
                     </td>
                   </tr>
@@ -268,8 +390,8 @@ function LeadsPage() {
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-sm">
             <p className="text-muted-foreground">
-              Showing {rows.length === 0 ? 0 : (current - 1) * perPage + 1} - {(current - 1) * perPage + rows.length} of{" "}
-              {filtered.length} entries
+              Showing {rows.length === 0 ? 0 : (current - 1) * perPage + 1} -{" "}
+              {(current - 1) * perPage + rows.length} of {filtered.length} entries
             </p>
             <div className="flex items-center gap-1">
               <PagerBtn onClick={() => setPage(current - 1)} disabled={current === 1}>
@@ -296,6 +418,177 @@ function LeadsPage() {
       </div>
 
       <LeadPreview lead={preview} onClose={() => setPreview(null)} />
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Add Lead</DialogTitle>
+            <DialogDescription>
+              Capture a new enquiry and drop it straight into the pipeline.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={submitLead} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-name">
+                  Name <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="lead-name"
+                  placeholder="Lead's full name"
+                  value={draft.name}
+                  onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-phone">
+                  Phone <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="lead-phone"
+                  placeholder="+91 98765 43210"
+                  value={draft.phone}
+                  onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="lead-email">Email</Label>
+              <Input
+                id="lead-email"
+                type="email"
+                placeholder="name@example.com"
+                value={draft.email}
+                onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-source">
+                  Source <span className="text-destructive">*</span>
+                </Label>
+                <Select
+                  value={draft.source}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, source: v }))}
+                >
+                  <SelectTrigger id="lead-source">
+                    <SelectValue placeholder="Select source" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leadSourceNames.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-project">
+                  Project <span className="text-destructive">*</span>
+                </Label>
+                <Select
+                  value={draft.project}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, project: v }))}
+                >
+                  <SelectTrigger id="lead-project">
+                    <SelectValue placeholder="Select project" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leadProjectNames.map((p) => (
+                      <SelectItem key={p} value={p}>
+                        {p}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-budget">Budget</Label>
+                <Select
+                  value={draft.budget}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, budget: v }))}
+                >
+                  <SelectTrigger id="lead-budget">
+                    <SelectValue placeholder="Budget" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leadBudgets.map((b) => (
+                      <SelectItem key={b} value={b}>
+                        {b}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-requirement">Requirement</Label>
+                <Select
+                  value={draft.requirement}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, requirement: v }))}
+                >
+                  <SelectTrigger id="lead-requirement">
+                    <SelectValue placeholder="Type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leadRequirements.map((r) => (
+                      <SelectItem key={r} value={r}>
+                        {r}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="lead-city">City</Label>
+                <Select
+                  value={draft.city}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, city: v }))}
+                >
+                  <SelectTrigger id="lead-city">
+                    <SelectValue placeholder="City" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leadCities.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="lead-assigned">Assign To</Label>
+              <Select
+                value={draft.assigned}
+                onValueChange={(v) => setDraft((d) => ({ ...d, assigned: v }))}
+              >
+                <SelectTrigger id="lead-assigned">
+                  <SelectValue placeholder="Leave unassigned" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teamMembers
+                    .filter((m) => m.role === "Agent" || m.role === "Team Lead")
+                    .map((m) => (
+                      <SelectItem key={m.id} value={m.name}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit">Add Lead</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
@@ -303,10 +596,7 @@ function LeadsPage() {
 function Th({ children, className }: { children?: React.ReactNode; className?: string }) {
   return (
     <th
-      className={cn(
-        "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide",
-        className,
-      )}
+      className={cn("px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide", className)}
     >
       {children}
     </th>
@@ -446,15 +736,17 @@ function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void
                   </Section>
                   <Section title="Tags">
                     <div className="flex flex-wrap gap-2">
-                      {["About to convert", "Cold", "Escalated", "Highlighted", "Hot", "Warm"].map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => toast.success(`Tag "${t}" applied`)}
-                          className="rounded-full border border-input px-3 py-1.5 text-xs font-medium transition-colors hover:border-primary hover:bg-accent"
-                        >
-                          {t}
-                        </button>
-                      ))}
+                      {["About to convert", "Cold", "Escalated", "Highlighted", "Hot", "Warm"].map(
+                        (t) => (
+                          <button
+                            key={t}
+                            onClick={() => toast.success(`Tag "${t}" applied`)}
+                            className="rounded-full border border-input px-3 py-1.5 text-xs font-medium transition-colors hover:border-primary hover:bg-accent"
+                          >
+                            {t}
+                          </button>
+                        ),
+                      )}
                     </div>
                   </Section>
                   <Section title="Assign To">
@@ -490,18 +782,20 @@ function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void
               {tab === "Status" && (
                 <Section title="Change Status">
                   <div className="grid grid-cols-2 gap-2">
-                    {["New", "Callback", "Follow Up", "Site Visit", "Booked", "Dropped"].map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => toast.success(`Status set to ${s}`)}
-                        className={cn(
-                          "rounded-lg border border-input px-3 py-2.5 text-sm font-medium transition-colors hover:bg-accent",
-                          s === lead.status && "border-primary bg-accent",
-                        )}
-                      >
-                        {s}
-                      </button>
-                    ))}
+                    {["New", "Callback", "Follow Up", "Site Visit", "Booked", "Dropped"].map(
+                      (s) => (
+                        <button
+                          key={s}
+                          onClick={() => toast.success(`Status set to ${s}`)}
+                          className={cn(
+                            "rounded-lg border border-input px-3 py-2.5 text-sm font-medium transition-colors hover:bg-accent",
+                            s === lead.status && "border-primary bg-accent",
+                          )}
+                        >
+                          {s}
+                        </button>
+                      ),
+                    )}
                   </div>
                 </Section>
               )}
