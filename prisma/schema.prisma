@@ -20,7 +20,11 @@ model Organization {
   slug      String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  members OrgMember[]
+  members     OrgMember[]
+  contacts    Contact[]
+  leads       Lead[]
+  activities  LeadActivity[]
+  assignments LeadAssignment[]
 
   @@map("organizations")
 }
@@ -35,7 +39,11 @@ model User {
   fullName  String?  @map("full_name")
   createdAt DateTime @default(now()) @map("created_at")
 
-  memberships OrgMember[]
+  memberships         OrgMember[]
+  assignedLeads       Lead[]           @relation("LeadAssignedTo")
+  authoredActivities  LeadActivity[]
+  assignmentsReceived LeadAssignment[] @relation("AssignmentAssignedTo")
+  assignmentsMade     LeadAssignment[] @relation("AssignmentAssignedBy")
 
   @@map("users")
 }
@@ -65,4 +73,129 @@ model OrgMember {
 
   @@unique([orgId, userId])
   @@map("org_members")
+}
+
+enum LeadStatus {
+  New
+  FollowUp  @map("Follow Up")
+  Callback
+  SiteVisit @map("Site Visit")
+  Booked
+  Dropped
+
+  @@map("lead_status")
+}
+
+enum ActivityType {
+  note
+  status_change
+  call
+  whatsapp
+  email
+  system
+
+  @@map("activity_type")
+}
+
+/// A person, distinct from a lead — one person can be three leads across
+/// three projects/sources. Merging these is "the #1 CRM schema regret"
+/// per the build plan; keep them separate from day one.
+model Contact {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  fullName  String   @map("full_name")
+  phone     String?
+  email     String?
+  city      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  leads        Lead[]
+
+  @@map("contacts")
+}
+
+/// The enquiry itself. Attribution columns (source_id..captured_at) are
+/// nullable and unpopulated in this slice — the ad hierarchy tables behind
+/// them are Phase 3. Adding the columns now, empty, is cheap; retrofitting
+/// them onto a live leads table with real data later is not (§3.5.2).
+model Lead {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String     @map("org_id") @db.Uuid
+  contactId    String     @map("contact_id") @db.Uuid
+  assignedTo   String?    @map("assigned_to") @db.Uuid
+  status       LeadStatus @default(New)
+  subStatus    String?    @map("sub_status")
+  source       String?
+  subSource    String?    @map("sub_source")
+  project      String?
+  budget       String?
+  requirement  String?
+  city         String?
+  nextActionAt DateTime?  @map("next_action_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+
+  // Attribution — §3.5.2, all nullable, unpopulated until Phase 3.
+  sourceId       String?   @map("source_id") @db.Uuid
+  adId           String?   @map("ad_id") @db.Uuid
+  adSetId        String?   @map("ad_set_id") @db.Uuid
+  campaignId     String?   @map("campaign_id") @db.Uuid
+  creativeId     String?   @map("creative_id")
+  formId         String?   @map("form_id")
+  platformLeadId String?   @map("platform_lead_id")
+  clickId        String?   @map("click_id")
+  utmSource      String?   @map("utm_source")
+  utmMedium      String?   @map("utm_medium")
+  utmCampaign    String?   @map("utm_campaign")
+  utmContent     String?   @map("utm_content")
+  utmTerm        String?   @map("utm_term")
+  landingPageUrl String?   @map("landing_page_url")
+  referrerUrl    String?   @map("referrer_url")
+  firstTouchAdId String?   @map("first_touch_ad_id") @db.Uuid
+  rawPayload     Json?     @map("raw_payload")
+  capturedAt     DateTime? @map("captured_at")
+
+  organization Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  contact      Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignee     User?            @relation("LeadAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
+  activities   LeadActivity[]
+  assignments  LeadAssignment[]
+
+  @@map("leads")
+}
+
+/// The timeline. One table across activity types rather than one per type,
+/// matching the existing UI's "History" tab.
+model LeadActivity {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String       @map("org_id") @db.Uuid
+  leadId    String       @map("lead_id") @db.Uuid
+  type      ActivityType
+  body      String
+  createdBy String?      @map("created_by") @db.Uuid
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  author       User?        @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@map("lead_activities")
+}
+
+/// History, not a column — "who had this lead in March" needs to be
+/// answerable in a brokerage dispute, per the build plan.
+model LeadAssignment {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  leadId     String   @map("lead_id") @db.Uuid
+  assignedTo String   @map("assigned_to") @db.Uuid
+  assignedBy String?  @map("assigned_by") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  organization   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead           Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee       User         @relation("AssignmentAssignedTo", fields: [assignedTo], references: [id], onDelete: Cascade)
+  assignedByUser User?        @relation("AssignmentAssignedBy", fields: [assignedBy], references: [id], onDelete: SetNull)
+
+  @@map("lead_assignments")
 }

@@ -60,6 +60,14 @@ const orgB = { id: randomUUID(), name: "Org B Realty", slug: `org-b-${run}` };
 const userA = { id: randomUUID(), email: `user-a-${run}@example.com` };
 const userB = { id: randomUUID(), email: `user-b-${run}@example.com` };
 
+const contactA = { id: randomUUID(), orgId: orgA.id, fullName: "Contact A" };
+const contactB = { id: randomUUID(), orgId: orgB.id, fullName: "Contact B" };
+// leadA starts unassigned on purpose — this is what exercises the
+// can_manage_lead "unclaimed lead" branch across orgs (see the bug this
+// caught, documented in docs/specs/01-leads.md).
+const leadA = { id: randomUUID(), orgId: orgA.id, contactId: contactA.id };
+const leadB = { id: randomUUID(), orgId: orgB.id, contactId: contactB.id, assignedTo: userB.id };
+
 beforeAll(async () => {
   // Seeded as the connection's base role (postgres superuser in the test
   // container), which bypasses RLS — the equivalent of the one audited
@@ -80,10 +88,14 @@ beforeAll(async () => {
       { orgId: orgB.id, userId: userB.id, role: "owner" },
     ],
   });
+
+  await prisma.contact.createMany({ data: [contactA, contactB] });
+  await prisma.lead.createMany({ data: [leadA, leadB] });
 });
 
 afterAll(async () => {
-  // auth.users FK is ON DELETE CASCADE into public.users/org_members.
+  // auth.users FK is ON DELETE CASCADE into public.users/org_members; org
+  // FK cascades into contacts/leads/lead_activities/lead_assignments.
   await prisma.$executeRawUnsafe(
     `DELETE FROM auth.users WHERE id IN ($1::uuid, $2::uuid)`,
     userA.id,
@@ -143,5 +155,65 @@ describe("tenant isolation", () => {
     const orphanId = randomUUID();
     const orgs = await asUser(orphanId, (tx) => tx.organization.findMany());
     expect(orgs).toHaveLength(0);
+  });
+});
+
+describe("lead management isolation", () => {
+  it("isolates contacts the same way as orgs/members/users", async () => {
+    const seenByB = await asUser(userB.id, (tx) => tx.contact.findMany());
+    expect(seenByB.map((c) => c.id)).toEqual([contactB.id]);
+  });
+
+  it("isolates leads — list and direct lookup both return nothing, not an error", async () => {
+    const seenByB = await asUser(userB.id, (tx) => tx.lead.findMany());
+    expect(seenByB.map((l) => l.id)).toEqual([leadB.id]);
+
+    const direct = await asUser(userB.id, (tx) => tx.lead.findUnique({ where: { id: leadA.id } }));
+    expect(direct).toBeNull();
+  });
+
+  it("a user in a different org cannot claim another org's unclaimed lead", async () => {
+    // leadA is unassigned. This is exactly the bug can_manage_lead had
+    // before it also checked org membership: "assigned_to IS NULL" alone
+    // used to be enough for ANY authenticated user to pass, regardless of
+    // org. userB (org B) attempting to touch leadA (org A, unclaimed) must
+    // fail — RLS makes the row invisible to update, which Prisma surfaces
+    // as "record not found," not a permission error and not the row's data.
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.lead.update({ where: { id: leadA.id }, data: { status: "Callback" } }),
+      ),
+    ).rejects.toMatchObject({ code: "P2025" });
+  });
+
+  it("a member of the lead's own org CAN claim an unclaimed lead", async () => {
+    const claimed = await asUser(userA.id, (tx) =>
+      tx.lead.update({ where: { id: leadA.id }, data: { assignedTo: userA.id } }),
+    );
+    expect(claimed.assignedTo).toBe(userA.id);
+
+    // Reset for other tests / reruns.
+    await asUser(userA.id, (tx) =>
+      tx.lead.update({ where: { id: leadA.id }, data: { assignedTo: null } }),
+    );
+  });
+
+  it("isolates lead_activities and lead_assignments", async () => {
+    await asUser(userB.id, (tx) =>
+      tx.leadActivity.create({
+        data: { orgId: orgB.id, leadId: leadB.id, type: "note", body: "Called, interested." },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.leadAssignment.create({
+        data: { orgId: orgB.id, leadId: leadB.id, assignedTo: userB.id },
+      }),
+    );
+
+    const activitiesSeenByA = await asUser(userA.id, (tx) => tx.leadActivity.findMany());
+    const assignmentsSeenByA = await asUser(userA.id, (tx) => tx.leadAssignment.findMany());
+
+    expect(activitiesSeenByA).toHaveLength(0);
+    expect(assignmentsSeenByA).toHaveLength(0);
   });
 });

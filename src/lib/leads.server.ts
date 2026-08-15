@@ -1,0 +1,240 @@
+import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
+import type { Prisma } from "@prisma/client";
+import { withUserContext } from "./db.server";
+import { requireUserId, requirePrimaryOrgId } from "./current-user.server";
+import { LEAD_STATUS_VALUES } from "./lead-status";
+
+const assigneeSelect = { id: true, fullName: true, email: true } as const;
+const contactSelect = { id: true, fullName: true, phone: true, email: true, city: true } as const;
+
+export const listLeads = createServerFn({ method: "GET" })
+  .validator(
+    z
+      .object({
+        status: z.enum(LEAD_STATUS_VALUES).optional(),
+        assignedTo: z.string().uuid().optional(),
+        search: z.string().optional(),
+      })
+      .optional(),
+  )
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    const where: Prisma.LeadWhereInput = {
+      ...(data?.status ? { status: data.status } : {}),
+      ...(data?.assignedTo ? { assignedTo: data.assignedTo } : {}),
+      ...(data?.search
+        ? {
+            OR: [
+              { contact: { fullName: { contains: data.search, mode: "insensitive" } } },
+              { contact: { phone: { contains: data.search } } },
+              { project: { contains: data.search, mode: "insensitive" } },
+              { source: { contains: data.search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
+
+    return withUserContext(userId, (tx) =>
+      tx.lead.findMany({
+        where,
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+        orderBy: { createdAt: "desc" },
+      }),
+    );
+  });
+
+export const getLead = createServerFn({ method: "GET" })
+  .validator(z.object({ leadId: z.string().uuid() }))
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    return withUserContext(userId, (tx) =>
+      tx.lead.findUnique({
+        where: { id: data.leadId },
+        include: {
+          contact: { select: contactSelect },
+          assignee: { select: assigneeSelect },
+          activities: {
+            include: { author: { select: assigneeSelect } },
+            orderBy: { createdAt: "desc" },
+          },
+          assignments: {
+            include: {
+              assignee: { select: assigneeSelect },
+              assignedByUser: { select: assigneeSelect },
+            },
+            orderBy: { assignedAt: "desc" },
+          },
+        },
+      }),
+    );
+  });
+
+const createLeadSchema = z.object({
+  fullName: z.string().min(1),
+  phone: z.string().min(1),
+  email: z.string().email().optional().or(z.literal("")),
+  source: z.string().optional(),
+  subSource: z.string().optional(),
+  project: z.string().optional(),
+  budget: z.string().optional(),
+  requirement: z.string().optional(),
+  city: z.string().optional(),
+  assignedTo: z.string().uuid().optional(),
+});
+
+export const createLead = createServerFn({ method: "POST" })
+  .validator(createLeadSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+    const orgId = await requirePrimaryOrgId(userId);
+
+    return withUserContext(userId, async (tx) => {
+      const contact = await tx.contact.create({
+        data: {
+          orgId,
+          fullName: data.fullName,
+          phone: data.phone,
+          email: data.email || null,
+          city: data.city ?? null,
+        },
+      });
+
+      const lead = await tx.lead.create({
+        data: {
+          orgId,
+          contactId: contact.id,
+          assignedTo: data.assignedTo ?? null,
+          source: data.source ?? null,
+          subSource: data.subSource ?? null,
+          project: data.project ?? null,
+          budget: data.budget ?? null,
+          requirement: data.requirement ?? null,
+          city: data.city ?? null,
+        },
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+      });
+
+      await tx.leadActivity.create({
+        data: { orgId, leadId: lead.id, type: "system", body: "Lead created", createdBy: userId },
+      });
+
+      if (data.assignedTo) {
+        await tx.leadAssignment.create({
+          data: { orgId, leadId: lead.id, assignedTo: data.assignedTo, assignedBy: userId },
+        });
+      }
+
+      return lead;
+    });
+  });
+
+const updateLeadStatusSchema = z.object({
+  leadId: z.string().uuid(),
+  status: z.enum(LEAD_STATUS_VALUES),
+  subStatus: z.string().optional(),
+});
+
+export const updateLeadStatus = createServerFn({ method: "POST" })
+  .validator(updateLeadStatusSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    return withUserContext(userId, async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id: data.leadId },
+        data: { status: data.status, subStatus: data.subStatus ?? null },
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+      });
+
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "status_change",
+          body: `Status changed to ${data.status}`,
+          createdBy: userId,
+        },
+      });
+
+      return lead;
+    });
+  });
+
+const addLeadNoteSchema = z.object({
+  leadId: z.string().uuid(),
+  body: z.string().min(1),
+});
+
+export const addLeadNote = createServerFn({ method: "POST" })
+  .validator(addLeadNoteSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    return withUserContext(userId, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: data.leadId } });
+
+      return tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "note",
+          body: data.body,
+          createdBy: userId,
+        },
+        include: { author: { select: assigneeSelect } },
+      });
+    });
+  });
+
+const reassignLeadSchema = z.object({
+  leadId: z.string().uuid(),
+  assignedTo: z.string().uuid().nullable(),
+});
+
+/**
+ * Reassigns (or unassigns / claims) a lead: updates leads.assigned_to and
+ * records the change in lead_assignments — history, not a column, per the
+ * build plan. Who's allowed to do this is enforced by app.can_manage_lead
+ * in the RLS policy on both tables, not by anything checked here.
+ */
+export const reassignLead = createServerFn({ method: "POST" })
+  .validator(reassignLeadSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    return withUserContext(userId, async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id: data.leadId },
+        data: { assignedTo: data.assignedTo },
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+      });
+
+      if (data.assignedTo) {
+        await tx.leadAssignment.create({
+          data: {
+            orgId: lead.orgId,
+            leadId: lead.id,
+            assignedTo: data.assignedTo,
+            assignedBy: userId,
+          },
+        });
+      }
+
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "system",
+          body: data.assignedTo
+            ? `Reassigned to ${lead.assignee?.fullName ?? "agent"}`
+            : "Unassigned",
+          createdBy: userId,
+        },
+      });
+
+      return lead;
+    });
+  });

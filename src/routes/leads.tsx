@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronLeft,
   ChevronRight,
@@ -12,25 +13,30 @@ import {
   Pencil,
   Phone,
   Search,
-  Trash2,
   UserRoundCheck,
   X,
 } from "lucide-react";
+import { LEAD_STATUS_VALUES, type LeadStatusValue } from "@/lib/lead-status";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
 import {
-  leads as seedLeads,
-  statusTone,
-  teamMembers,
   leadBudgets,
   leadRequirements,
   leadCities,
   leadSourceNames,
   leadProjectNames,
-  type Lead,
-  type LeadStatus,
 } from "@/data/crm";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import {
+  createLead,
+  getLead,
+  listLeads,
+  reassignLead,
+  updateLeadStatus,
+  addLeadNote,
+} from "@/lib/leads.server";
+import { listOrgMembers } from "@/lib/org-members.server";
+import { getCurrentUser } from "@/lib/auth.server";
 import {
   Dialog,
   DialogContent,
@@ -70,24 +76,26 @@ export const Route = createFileRoute("/leads")({
   component: LeadsPage,
 });
 
-const tabs = [
-  "All",
-  "My Leads",
-  "Team's",
-  "Unassigned",
-  "Deleted",
-  "Duplicate",
-  "Re Enquired",
-] as const;
-const statusFilters = [
-  "All",
-  "New",
-  "Callback",
-  "Follow Up",
-  "Site Visit",
-  "Booked",
-  "Dropped",
-] as const;
+const statusLabels: Record<LeadStatusValue, string> = {
+  New: "New",
+  Callback: "Callback",
+  FollowUp: "Follow Up",
+  SiteVisit: "Site Visit",
+  Booked: "Booked",
+  Dropped: "Dropped",
+};
+
+const statusTone: Record<LeadStatusValue, string> = {
+  New: "text-info",
+  Callback: "text-warning",
+  FollowUp: "text-info",
+  SiteVisit: "text-primary",
+  Booked: "text-success",
+  Dropped: "text-destructive",
+};
+
+const tabs = ["All", "My Leads", "Unassigned"] as const;
+const statusFilters = ["All", ...LEAD_STATUS_VALUES] as const;
 
 const emptyDraft = {
   name: "",
@@ -99,43 +107,72 @@ const emptyDraft = {
   budget: "",
   requirement: "",
   city: "",
-  assigned: "",
+  assignedTo: "",
 };
 
 function LeadsPage() {
-  const [leads, setLeads] = useState<Lead[]>(seedLeads);
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [status, setStatus] = useState<(typeof statusFilters)[number]>("All");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
-  const [preview, setPreview] = useState<Lead | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
   const perPage = 10;
 
+  const currentUserQuery = useQuery({
+    queryKey: ["current-user"],
+    queryFn: () => getCurrentUser(),
+  });
+  const currentUserId = currentUserQuery.data?.user?.id;
+
+  const orgMembersQuery = useQuery({ queryKey: ["org-members"], queryFn: () => listOrgMembers() });
+  const assignableMembers = (orgMembersQuery.data ?? []).map((m) => ({
+    id: m.user.id,
+    name: m.user.fullName ?? m.user.email,
+  }));
+
+  const filters = useMemo(
+    () => ({
+      status: status === "All" ? undefined : status,
+      assignedTo: tab === "My Leads" ? currentUserId : undefined,
+      search: query || undefined,
+    }),
+    [status, tab, currentUserId, query],
+  );
+
+  const leadsQuery = useQuery({
+    queryKey: ["leads", filters],
+    queryFn: () => listLeads({ data: filters }),
+  });
+
   const filtered = useMemo(() => {
-    return leads.filter((l) => {
-      if (status !== "All" && l.status !== status) return false;
-      if (tab === "My Leads" && l.assigned !== "Jatin Thakkar") return false;
-      if (tab === "Unassigned" && !l.untouched) return false;
-      if (tab === "Deleted" || tab === "Duplicate") return false;
-      if (tab === "Re Enquired" && l.source !== "Website") return false;
-      if (!query) return true;
-      const q = query.toLowerCase();
-      return (
-        l.name.toLowerCase().includes(q) ||
-        l.phone.includes(q) ||
-        l.project.toLowerCase().includes(q) ||
-        l.source.toLowerCase().includes(q)
-      );
-    });
-  }, [leads, tab, status, query]);
+    const allLeads = leadsQuery.data ?? [];
+    if (tab === "Unassigned") return allLeads.filter((l) => !l.assignee);
+    return allLeads;
+  }, [leadsQuery.data, tab]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / perPage));
   const current = Math.min(page, pageCount);
   const rows = filtered.slice((current - 1) * perPage, current * perPage);
   const allChecked = rows.length > 0 && rows.every((r) => selected.includes(r.id));
+
+  const createLeadMutation = useMutation({
+    mutationFn: createLead,
+    onSuccess: (lead) => {
+      void queryClient.invalidateQueries({ queryKey: ["leads"] });
+      setTab("All");
+      setStatus("All");
+      setQuery("");
+      setPage(1);
+      setDraft(emptyDraft);
+      setAddOpen(false);
+      toast.success(`${lead.contact.fullName} added as a new lead`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not add lead"),
+  });
 
   function submitLead(e: React.FormEvent) {
     e.preventDefault();
@@ -143,41 +180,20 @@ function LeadsPage() {
       toast.error("Please fill in name, phone, source and project");
       return;
     }
-    const now = new Date();
-    const stamp = now.toLocaleDateString("en-GB").replaceAll("/", "-");
-    const lead: Lead = {
-      id: `LD-${1000 + leads.length + Math.floor(Math.random() * 900)}`,
-      name: draft.name.trim(),
-      phone: draft.phone.trim(),
-      email: draft.email.trim() || `${draft.name.trim().split(" ")[0]!.toLowerCase()}@example.com`,
-      assigned: draft.assigned || "Unassigned",
-      source: draft.source,
-      subSource: draft.subSource.trim() || "manual entry",
-      status: "New" as LeadStatus,
-      subStatus: "awaiting first call",
-      project: draft.project,
-      budget: draft.budget || "—",
-      requirement: draft.requirement || "—",
-      city: draft.city || "—",
-      createdAt: stamp,
-      nextAction: "Not scheduled",
-      notes: [],
-      history: [
-        {
-          at: `${stamp} ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`,
-          by: "System",
-          action: "Lead created",
-        },
-      ],
-    };
-    setLeads((prev) => [lead, ...prev]);
-    setTab("All");
-    setStatus("All");
-    setQuery("");
-    setPage(1);
-    setDraft(emptyDraft);
-    setAddOpen(false);
-    toast.success(`${lead.name} added as a new lead`);
+    createLeadMutation.mutate({
+      data: {
+        fullName: draft.name.trim(),
+        phone: draft.phone.trim(),
+        email: draft.email.trim() || undefined,
+        source: draft.source,
+        subSource: draft.subSource.trim() || undefined,
+        project: draft.project,
+        budget: draft.budget || undefined,
+        requirement: draft.requirement || undefined,
+        city: draft.city || undefined,
+        assignedTo: draft.assignedTo || undefined,
+      },
+    });
   }
 
   return (
@@ -238,7 +254,7 @@ function LeadsPage() {
             >
               {statusFilters.map((s) => (
                 <option key={s} value={s}>
-                  {s === "All" ? "All statuses" : s}
+                  {s === "All" ? "All statuses" : statusLabels[s]}
                 </option>
               ))}
             </select>
@@ -264,7 +280,7 @@ function LeadsPage() {
             <Chip label={`Leads: ${filtered.length}`} />
             <Chip label={`View: ${tab}`} />
             {status !== "All" && (
-              <Chip label={`Status: ${status}`} onClear={() => setStatus("All")} />
+              <Chip label={`Status: ${statusLabels[status]}`} onClear={() => setStatus("All")} />
             )}
             {query && <Chip label={`Search: ${query}`} onClear={() => setQuery("")} />}
             {selected.length > 0 && (
@@ -302,79 +318,99 @@ function LeadsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((l) => (
-                  <tr
-                    key={l.id}
-                    onClick={() => setPreview(l)}
-                    className={cn(
-                      "cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-secondary/70",
-                      preview?.id === l.id && "bg-accent/60",
-                    )}
-                  >
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${l.name}`}
-                        checked={selected.includes(l.id)}
-                        onChange={(e) =>
-                          setSelected((prev) =>
-                            e.target.checked ? [...prev, l.id] : prev.filter((id) => id !== l.id),
-                          )
-                        }
-                        className="size-4 accent-[oklch(0.68_0.11_178)]"
-                      />
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="font-semibold">{l.name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {l.requirement} · {l.budget}
-                        {l.untouched && <span className="ml-1 text-warning">· Untouched</span>}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="font-medium">{l.assigned}</p>
-                      <p className="text-xs text-muted-foreground">primary</p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="font-medium">{l.source}</p>
-                      <p className="max-w-[180px] truncate text-xs text-muted-foreground">
-                        {l.subSource}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className={cn("font-semibold", statusTone[l.status])}>{l.status}</p>
-                      <p className="text-xs text-muted-foreground">{l.subStatus}</p>
-                    </td>
-                    <td className="px-4 py-3 font-medium">{l.project}</td>
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-1.5">
-                        {(
-                          [
-                            [Pencil, "Edit", "bg-primary/15 text-primary"],
-                            [Phone, "Call", "bg-info/15 text-info"],
-                            [MessageCircle, "WhatsApp", "bg-success/15 text-success"],
-                            [Mail, "Email", "bg-warning/20 text-warning"],
-                            [Trash2, "Delete", "bg-destructive/12 text-destructive"],
-                          ] as const
-                        ).map(([Icon, label, tone]) => (
-                          <button
-                            key={label}
-                            title={label}
-                            aria-label={`${label} ${l.name}`}
-                            onClick={() => toast.success(`${label} — ${l.name}`)}
-                            className={cn(
-                              "grid size-8 place-items-center rounded-md transition-transform hover:scale-105",
-                              tone,
-                            )}
-                          >
-                            <Icon className="size-4" />
-                          </button>
-                        ))}
-                      </div>
+                {leadsQuery.isLoading && (
+                  <tr>
+                    <td
+                      colSpan={7}
+                      className="px-4 py-16 text-center text-sm text-muted-foreground"
+                    >
+                      Loading leads...
                     </td>
                   </tr>
-                ))}
-                {rows.length === 0 && (
+                )}
+                {leadsQuery.isError && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-16 text-center text-sm text-destructive">
+                      Couldn't load leads.{" "}
+                      {leadsQuery.error instanceof Error ? leadsQuery.error.message : ""}
+                    </td>
+                  </tr>
+                )}
+                {!leadsQuery.isLoading &&
+                  !leadsQuery.isError &&
+                  rows.map((l) => (
+                    <tr
+                      key={l.id}
+                      onClick={() => setPreviewId(l.id)}
+                      className={cn(
+                        "cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-secondary/70",
+                        previewId === l.id && "bg-accent/60",
+                      )}
+                    >
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${l.contact.fullName}`}
+                          checked={selected.includes(l.id)}
+                          onChange={(e) =>
+                            setSelected((prev) =>
+                              e.target.checked ? [...prev, l.id] : prev.filter((id) => id !== l.id),
+                            )
+                          }
+                          className="size-4 accent-[oklch(0.68_0.11_178)]"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="font-semibold">{l.contact.fullName}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {l.requirement ?? "—"} · {l.budget ?? "—"}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="font-medium">{l.assignee?.fullName ?? "Unassigned"}</p>
+                        <p className="text-xs text-muted-foreground">primary</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="font-medium">{l.source ?? "—"}</p>
+                        <p className="max-w-[180px] truncate text-xs text-muted-foreground">
+                          {l.subSource ?? ""}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className={cn("font-semibold", statusTone[l.status])}>
+                          {statusLabels[l.status]}
+                        </p>
+                        <p className="text-xs text-muted-foreground">{l.subStatus ?? ""}</p>
+                      </td>
+                      <td className="px-4 py-3 font-medium">{l.project ?? "—"}</td>
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex justify-end gap-1.5">
+                          {(
+                            [
+                              [Pencil, "Edit", "bg-primary/15 text-primary"],
+                              [Phone, "Call", "bg-info/15 text-info"],
+                              [MessageCircle, "WhatsApp", "bg-success/15 text-success"],
+                              [Mail, "Email", "bg-warning/20 text-warning"],
+                            ] as const
+                          ).map(([Icon, label, tone]) => (
+                            <button
+                              key={label}
+                              title={label}
+                              aria-label={`${label} ${l.contact.fullName}`}
+                              onClick={() => toast.success(`${label} — ${l.contact.fullName}`)}
+                              className={cn(
+                                "grid size-8 place-items-center rounded-md transition-transform hover:scale-105",
+                                tone,
+                              )}
+                            >
+                              <Icon className="size-4" />
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                {!leadsQuery.isLoading && !leadsQuery.isError && rows.length === 0 && (
                   <tr>
                     <td
                       colSpan={7}
@@ -417,7 +453,11 @@ function LeadsPage() {
         </div>
       </div>
 
-      <LeadPreview lead={preview} onClose={() => setPreview(null)} />
+      <LeadPreview
+        leadId={previewId}
+        onClose={() => setPreviewId(null)}
+        assignableMembers={assignableMembers}
+      />
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto">
@@ -563,20 +603,18 @@ function LeadsPage() {
             <div className="space-y-1.5">
               <Label htmlFor="lead-assigned">Assign To</Label>
               <Select
-                value={draft.assigned}
-                onValueChange={(v) => setDraft((d) => ({ ...d, assigned: v }))}
+                value={draft.assignedTo}
+                onValueChange={(v) => setDraft((d) => ({ ...d, assignedTo: v }))}
               >
                 <SelectTrigger id="lead-assigned">
                   <SelectValue placeholder="Leave unassigned" />
                 </SelectTrigger>
                 <SelectContent>
-                  {teamMembers
-                    .filter((m) => m.role === "Agent" || m.role === "Team Lead")
-                    .map((m) => (
-                      <SelectItem key={m.id} value={m.name}>
-                        {m.name}
-                      </SelectItem>
-                    ))}
+                  {assignableMembers.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -584,7 +622,9 @@ function LeadsPage() {
               <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Add Lead</Button>
+              <Button type="submit" disabled={createLeadMutation.isPending}>
+                {createLeadMutation.isPending ? "Adding..." : "Add Lead"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -636,10 +676,58 @@ function PagerBtn({
   );
 }
 
-const previewTabs = ["Overview", "Status", "History", "Notes", "Document"] as const;
+const previewTabs = ["Overview", "Status", "History", "Notes"] as const;
 
-function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void }) {
+function LeadPreview({
+  leadId,
+  onClose,
+  assignableMembers,
+}: {
+  leadId: string | null;
+  onClose: () => void;
+  assignableMembers: { id: string; name: string }[];
+}) {
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof previewTabs)[number]>("Overview");
+  const [noteText, setNoteText] = useState("");
+
+  const leadQuery = useQuery({
+    queryKey: ["lead", leadId],
+    queryFn: () => getLead({ data: { leadId: leadId! } }),
+    enabled: !!leadId,
+  });
+
+  const lead = leadQuery.data;
+
+  const statusMutation = useMutation({
+    mutationFn: updateLeadStatus,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["leads"] });
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      toast.success("Status updated");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update status"),
+  });
+
+  const reassignMutation = useMutation({
+    mutationFn: reassignLead,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["leads"] });
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      toast.success("Lead re-assigned");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not reassign"),
+  });
+
+  const noteMutation = useMutation({
+    mutationFn: addLeadNote,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      setNoteText("");
+      toast.success("Note saved");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not save note"),
+  });
 
   return (
     <>
@@ -647,16 +735,16 @@ function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void
         onClick={onClose}
         className={cn(
           "fixed inset-0 z-30 bg-foreground/25 transition-opacity duration-200",
-          lead ? "opacity-100" : "pointer-events-none opacity-0",
+          leadId ? "opacity-100" : "pointer-events-none opacity-0",
         )}
       />
       <aside
         className={cn(
           "fixed right-0 top-0 z-40 flex h-screen w-full max-w-[440px] flex-col border-l border-border bg-card shadow-2xl transition-transform duration-300 ease-out",
-          lead ? "translate-x-0" : "translate-x-full",
+          leadId ? "translate-x-0" : "translate-x-full",
         )}
       >
-        {lead && (
+        {leadId && (
           <>
             <div className="flex items-center gap-2 border-b border-border px-5 py-4">
               <button
@@ -680,7 +768,7 @@ function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void
                     key={label}
                     aria-label={label}
                     title={label}
-                    onClick={() => toast.success(`${label} — ${lead.name}`)}
+                    onClick={() => toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)}
                     className="grid size-8 place-items-center rounded-md bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                   >
                     <Icon className="size-4" />
@@ -689,164 +777,192 @@ function LeadPreview({ lead, onClose }: { lead: Lead | null; onClose: () => void
               </div>
             </div>
 
-            <div className="border-b border-border bg-secondary/50 px-5 py-4">
-              <p className="text-lg font-bold">{lead.name}</p>
-              <div className="mt-1 space-y-0.5 text-sm text-muted-foreground">
-                <p>{lead.phone}</p>
-                <p>{lead.email}</p>
-                <p>
-                  {lead.city} · {lead.requirement} · {lead.budget}
-                </p>
+            {leadQuery.isLoading && (
+              <div className="flex-1 grid place-items-center text-sm text-muted-foreground">
+                Loading...
               </div>
-            </div>
+            )}
+            {leadQuery.isError && (
+              <div className="flex-1 grid place-items-center text-sm text-destructive">
+                Couldn't load this lead.
+              </div>
+            )}
 
-            <div className="flex gap-1 border-b border-border px-3">
-              {previewTabs.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "relative px-3 py-3 text-sm font-medium transition-colors",
-                    tab === t ? "text-primary" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {t}
-                  {tab === t && (
-                    <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
-                  )}
-                </button>
-              ))}
-            </div>
+            {lead && (
+              <>
+                <div className="border-b border-border bg-secondary/50 px-5 py-4">
+                  <p className="text-lg font-bold">{lead.contact.fullName}</p>
+                  <div className="mt-1 space-y-0.5 text-sm text-muted-foreground">
+                    <p>{lead.contact.phone ?? "—"}</p>
+                    <p>{lead.contact.email ?? "—"}</p>
+                    <p>
+                      {lead.contact.city ?? "—"} · {lead.requirement ?? "—"} · {lead.budget ?? "—"}
+                    </p>
+                  </div>
+                </div>
 
-            <div className="flex-1 space-y-5 overflow-y-auto p-5">
-              {tab === "Overview" && (
-                <>
-                  <Section title="Lead Status">
-                    <div className="rounded-xl bg-secondary p-4">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className={cn("font-semibold", statusTone[lead.status])}>
-                          {lead.status}
-                        </span>
-                        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                          <Clock3 className="size-3.5" /> {lead.nextAction}
-                        </span>
-                      </div>
-                      <p className="mt-2 text-sm text-muted-foreground">{lead.subStatus}</p>
-                    </div>
-                  </Section>
-                  <Section title="Tags">
-                    <div className="flex flex-wrap gap-2">
-                      {["About to convert", "Cold", "Escalated", "Highlighted", "Hot", "Warm"].map(
-                        (t) => (
-                          <button
-                            key={t}
-                            onClick={() => toast.success(`Tag "${t}" applied`)}
-                            className="rounded-full border border-input px-3 py-1.5 text-xs font-medium transition-colors hover:border-primary hover:bg-accent"
-                          >
-                            {t}
-                          </button>
-                        ),
+                <div className="flex gap-1 border-b border-border px-3">
+                  {previewTabs.map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setTab(t)}
+                      className={cn(
+                        "relative px-3 py-3 text-sm font-medium transition-colors",
+                        tab === t ? "text-primary" : "text-muted-foreground hover:text-foreground",
                       )}
-                    </div>
-                  </Section>
-                  <Section title="Assign To">
-                    <div className="flex items-center gap-3 rounded-xl border border-border p-3">
-                      <span className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
-                        {lead.assigned.charAt(0)}
-                      </span>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold">{lead.assigned}</p>
-                        <p className="text-xs text-muted-foreground">primary</p>
+                    >
+                      {t}
+                      {tab === t && (
+                        <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex-1 space-y-5 overflow-y-auto p-5">
+                  {tab === "Overview" && (
+                    <>
+                      <Section title="Lead Status">
+                        <div className="rounded-xl bg-secondary p-4">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className={cn("font-semibold", statusTone[lead.status])}>
+                              {statusLabels[lead.status]}
+                            </span>
+                            {lead.nextActionAt && (
+                              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <Clock3 className="size-3.5" />{" "}
+                                {new Date(lead.nextActionAt).toLocaleString()}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            {lead.subStatus ?? "—"}
+                          </p>
+                        </div>
+                      </Section>
+                      <Section title="Assign To">
+                        <div className="flex items-center gap-3 rounded-xl border border-border p-3">
+                          <span className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                            {(lead.assignee?.fullName ?? "?").charAt(0)}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold">
+                              {lead.assignee?.fullName ?? "Unassigned"}
+                            </p>
+                            <p className="text-xs text-muted-foreground">primary</p>
+                          </div>
+                          <Select
+                            value={lead.assignedTo ?? ""}
+                            onValueChange={(v) =>
+                              reassignMutation.mutate({ data: { leadId: lead.id, assignedTo: v } })
+                            }
+                          >
+                            <SelectTrigger className="ml-auto w-[160px]">
+                              <SelectValue placeholder="Re-assign" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {assignableMembers.map((m) => (
+                                <SelectItem key={m.id} value={m.id}>
+                                  <span className="inline-flex items-center gap-1.5">
+                                    <UserRoundCheck className="size-3.5" /> {m.name}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </Section>
+                      <Section title="Enquiry Info">
+                        <dl className="grid grid-cols-2 gap-4 rounded-xl bg-secondary p-4 text-sm">
+                          <Field label="Source" value={lead.source ?? "—"} />
+                          <Field label="Sub Source" value={lead.subSource ?? "—"} />
+                          <Field label="Project" value={lead.project ?? "—"} />
+                          <Field
+                            label="Created"
+                            value={new Date(lead.createdAt).toLocaleDateString()}
+                          />
+                          <Field label="Requirement" value={lead.requirement ?? "—"} />
+                          <Field label="Budget" value={lead.budget ?? "—"} />
+                        </dl>
+                      </Section>
+                    </>
+                  )}
+
+                  {tab === "Status" && (
+                    <Section title="Change Status">
+                      <div className="grid grid-cols-2 gap-2">
+                        {LEAD_STATUS_VALUES.map((s) => (
+                          <button
+                            key={s}
+                            onClick={() =>
+                              statusMutation.mutate({ data: { leadId: lead.id, status: s } })
+                            }
+                            disabled={statusMutation.isPending}
+                            className={cn(
+                              "rounded-lg border border-input px-3 py-2.5 text-sm font-medium transition-colors hover:bg-accent",
+                              s === lead.status && "border-primary bg-accent",
+                            )}
+                          >
+                            {statusLabels[s]}
+                          </button>
+                        ))}
                       </div>
+                    </Section>
+                  )}
+
+                  {tab === "History" && (
+                    <ol className="relative space-y-5 border-l border-border pl-5">
+                      {lead.activities.length === 0 && (
+                        <p className="text-sm text-muted-foreground">No activity yet.</p>
+                      )}
+                      {lead.activities.map((a) => (
+                        <li key={a.id}>
+                          <span className="absolute -left-[5px] mt-1.5 size-2.5 rounded-full bg-primary" />
+                          <p className="text-sm font-medium">{a.body}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(a.createdAt).toLocaleString()} ·{" "}
+                            {a.author?.fullName ?? "System"}
+                          </p>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+
+                  {tab === "Notes" && (
+                    <div className="space-y-3">
+                      {lead.activities
+                        .filter((a) => a.type === "note")
+                        .map((n) => (
+                          <div key={n.id} className="rounded-xl border border-border p-4">
+                            <p className="text-sm">{n.body}</p>
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              {n.author?.fullName ?? "System"} ·{" "}
+                              {new Date(n.createdAt).toLocaleString()}
+                            </p>
+                          </div>
+                        ))}
+                      <textarea
+                        value={noteText}
+                        onChange={(e) => setNoteText(e.target.value)}
+                        placeholder="Add a note..."
+                        rows={3}
+                        className="w-full rounded-xl border border-input bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring/40"
+                      />
                       <button
-                        onClick={() => toast.success("Lead re-assigned")}
-                        className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                        onClick={() => {
+                          if (!noteText.trim()) return;
+                          noteMutation.mutate({ data: { leadId: lead.id, body: noteText.trim() } });
+                        }}
+                        disabled={noteMutation.isPending}
+                        className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
                       >
-                        <UserRoundCheck className="size-3.5" /> Re-Assign
+                        {noteMutation.isPending ? "Saving..." : "Save note"}
                       </button>
                     </div>
-                  </Section>
-                  <Section title="Enquiry Info">
-                    <dl className="grid grid-cols-2 gap-4 rounded-xl bg-secondary p-4 text-sm">
-                      <Field label="Source" value={lead.source} />
-                      <Field label="Sub Source" value={lead.subSource} />
-                      <Field label="Project" value={lead.project} />
-                      <Field label="Created" value={lead.createdAt} />
-                      <Field label="Requirement" value={lead.requirement} />
-                      <Field label="Budget" value={lead.budget} />
-                    </dl>
-                  </Section>
-                </>
-              )}
-
-              {tab === "Status" && (
-                <Section title="Change Status">
-                  <div className="grid grid-cols-2 gap-2">
-                    {["New", "Callback", "Follow Up", "Site Visit", "Booked", "Dropped"].map(
-                      (s) => (
-                        <button
-                          key={s}
-                          onClick={() => toast.success(`Status set to ${s}`)}
-                          className={cn(
-                            "rounded-lg border border-input px-3 py-2.5 text-sm font-medium transition-colors hover:bg-accent",
-                            s === lead.status && "border-primary bg-accent",
-                          )}
-                        >
-                          {s}
-                        </button>
-                      ),
-                    )}
-                  </div>
-                </Section>
-              )}
-
-              {tab === "History" && (
-                <ol className="relative space-y-5 border-l border-border pl-5">
-                  {lead.history.map((h, i) => (
-                    <li key={i}>
-                      <span className="absolute -left-[5px] mt-1.5 size-2.5 rounded-full bg-primary" />
-                      <p className="text-sm font-medium">{h.action}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {h.at} · {h.by}
-                      </p>
-                    </li>
-                  ))}
-                </ol>
-              )}
-
-              {tab === "Notes" && (
-                <div className="space-y-3">
-                  {lead.notes.map((n, i) => (
-                    <div key={i} className="rounded-xl border border-border p-4">
-                      <p className="text-sm">{n.text}</p>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        {n.by} · {n.at}
-                      </p>
-                    </div>
-                  ))}
-                  <textarea
-                    placeholder="Add a note..."
-                    rows={3}
-                    className="w-full rounded-xl border border-input bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring/40"
-                  />
-                  <button
-                    onClick={() => toast.success("Note saved")}
-                    className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
-                  >
-                    Save note
-                  </button>
+                  )}
                 </div>
-              )}
-
-              {tab === "Document" && (
-                <div className="grid place-items-center rounded-xl border border-dashed border-border py-16 text-center">
-                  <p className="text-sm font-medium">No documents uploaded</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Agreements, KYC and payment receipts will appear here.
-                  </p>
-                </div>
-              )}
-            </div>
+              </>
+            )}
           </>
         )}
       </aside>
