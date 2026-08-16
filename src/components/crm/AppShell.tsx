@@ -19,10 +19,10 @@ import {
   LogOut,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
-import { currentUser } from "@/data/crm";
 import { toast } from "sonner";
-import { signOut } from "@/lib/auth.server";
+import { signOut, getCurrentUser } from "@/lib/auth.server";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,6 +58,14 @@ export function AppShell({
   const [collapsed, setCollapsed] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
+
+  const currentUserQuery = useQuery({
+    queryKey: ["current-user"],
+    queryFn: () => getCurrentUser(),
+  });
+  const user = currentUserQuery.data?.user;
+  const displayName = user?.fullName ?? user?.email ?? "Loading...";
+  const displayEmail = user?.email ?? "";
 
   async function handleLogOut() {
     try {
@@ -147,15 +155,15 @@ export function AppShell({
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-2 rounded-full pl-1 pr-2 py-1 transition-colors hover:bg-secondary">
                   <span className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
-                    {initials(currentUser.name)}
+                    {initials(displayName)}
                   </span>
-                  <span className="text-sm font-medium">{currentUser.name.split(" ")[0]}</span>
+                  <span className="text-sm font-medium">{displayName.split(" ")[0]}</span>
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
-                  <p className="text-sm font-semibold">{currentUser.name}</p>
-                  <p className="text-xs font-normal text-muted-foreground">{currentUser.email}</p>
+                  <p className="text-sm font-semibold">{displayName}</p>
+                  <p className="text-xs font-normal text-muted-foreground">{displayEmail}</p>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>

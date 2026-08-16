@@ -137,6 +137,55 @@ Caught while extending `tests/tenant-isolation.test.ts` to cover
 leads, before the migration was ever applied anywhere — exactly the
 kind of bug that class of test exists to catch.
 
+### Findings from an independent review, fixed in `*_fix_role_escalation_and_org_pinning`
+
+An agent-driven review of the whole session's code (not just this
+module) found several more gaps, all fixed in one follow-up migration
+plus application-code changes, each with a regression test in
+`tests/tenant-isolation.test.ts`:
+
+- **Critical — org takeover.** `app.is_org_admin()` treated `admin`
+  and `owner` identically everywhere `org_members` was written, and
+  the UPDATE policy had no explicit `WITH CHECK` at all (Postgres
+  reuses `USING` when one is missing, which never inspected the `role`
+  column). A plain admin could grant themselves `owner` — reachable
+  through the Team page's "Add Member" dialog too, since
+  `addOrgMemberByEmail` only checked the caller was owner-or-admin,
+  never restricting which role they could hand out — and could delete
+  the real owner's row outright, with no last-owner protection. Fixed
+  with two new helpers, `app.is_org_owner()` and `app.is_last_owner()`,
+  and owner-gated checks on every `org_members` write. Because
+  `addOrgMemberByEmail` uses the service-role admin client (which
+  bypasses RLS by design — see `src/lib/supabase/admin.server.ts`),
+  the RLS fix alone doesn't cover it; there's a matching explicit
+  check in the function itself.
+- **High — cross-org data move.** `leads`/`contacts` UPDATE policies
+  checked the *new* `org_id` was some org the caller belonged to, but
+  never that it matched the row's *existing* `org_id` — reachable by
+  any multi-org user (a supported case) via the Supabase client
+  library directly, bypassing this app's server functions entirely.
+  Fixed with a `BEFORE UPDATE` trigger (not RLS — an RLS `WITH CHECK`
+  subquery re-reading the same table for the same row sees the
+  already-updated value, making an old-vs-new comparison a no-op;
+  triggers have real `OLD`/`NEW` access) making `org_id` immutable
+  after insert.
+- **Medium — reassignment broken for non-admins.** `can_manage_lead`
+  re-queries `leads` live; `reassignLead`/`createLead` used to update
+  `leads.assigned_to` *before* recording the assignment in
+  `lead_assignments`, so the assignment insert's permission check saw
+  the lead's state *after* the handoff, not before. Any non-admin
+  handing a lead to a *named colleague* (not to themselves, not
+  unassigning) always hit a hard RLS error. Fixed by reordering: record
+  the assignment first, evaluated against the pre-handoff state, then
+  update the lead.
+- **Low.** Follow-up date/time is now converted to a real ISO string
+  client-side (the browser knows the user's timezone; the server
+  doesn't) before being sent, rather than parsed as a timezone-less
+  string server-side. `requirePrimaryOrgId`'s lookup now has an
+  explicit `orderBy`, since Postgres gives no ordering guarantee
+  otherwise. `assignedTo` is now checked against real org membership
+  before a lead can be assigned to someone.
+
 ## Open question for you
 
 Is this slice — leads + contacts + timeline + assignment history +

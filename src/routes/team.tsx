@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { Mail, MessageCircle, Phone, Search, Trash2, UsersRound } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Mail, Trash2, UsersRound } from "lucide-react";
 import { AppShell, PrimaryAction, initials } from "@/components/crm/AppShell";
-import { teamMembers as seedMembers, teams, type TeamMember, type TeamRole } from "@/data/crm";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { listOrgMembers, addOrgMemberByEmail, removeOrgMember } from "@/lib/org-members.server";
+import { ORG_ROLE_VALUES, ORG_ROLE_LABELS, type OrgRoleValue } from "@/lib/org-role";
 import {
   Dialog,
   DialogContent,
@@ -28,90 +30,74 @@ export const Route = createFileRoute("/team")({
   head: () => ({
     meta: [
       { title: "Team — Estatly Real Estate CRM" },
-      {
-        name: "description",
-        content: "Sales hierarchy, roles and lead-distribution rules for your team.",
-      },
+      { name: "description", content: "Roles and org membership for your team." },
       { property: "og:title", content: "Team — Estatly Real Estate CRM" },
-      { property: "og:description", content: "Manage agents, managers and lead-routing rules." },
+      {
+        property: "og:description",
+        content: "Manage who belongs to your organization and their role.",
+      },
     ],
   }),
   component: TeamPage,
 });
 
-const roles: (TeamRole | "All")[] = ["All", "Admin", "Manager", "Team Lead", "Agent"];
+const roleFilters = ["All", ...ORG_ROLE_VALUES] as const;
 
-const emptyDraft = {
-  name: "",
-  email: "",
-  phone: "",
-  role: "" as TeamRole | "",
-  team: "" as string,
-  isActive: true,
-};
+const emptyDraft = { email: "", role: "" as OrgRoleValue | "" };
 
 function TeamPage() {
-  const [members, setMembers] = useState<TeamMember[]>(seedMembers);
-  const [role, setRole] = useState<(typeof roles)[number]>("All");
+  const queryClient = useQueryClient();
+  const [role, setRole] = useState<(typeof roleFilters)[number]>("All");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
 
-  const rows = useMemo(
-    () =>
-      members.filter(
-        (m) =>
-          (role === "All" || m.role === role) &&
-          (m.name.toLowerCase().includes(query.toLowerCase()) ||
-            m.email.toLowerCase().includes(query.toLowerCase()) ||
-            m.team.toLowerCase().includes(query.toLowerCase())),
-      ),
-    [members, role, query],
-  );
+  const membersQuery = useQuery({ queryKey: ["org-members"], queryFn: () => listOrgMembers() });
+
+  const rows = useMemo(() => {
+    const members = membersQuery.data ?? [];
+    return members.filter(
+      (m) =>
+        (role === "All" || m.role === role) &&
+        ((m.user.fullName ?? "").toLowerCase().includes(query.toLowerCase()) ||
+          m.user.email.toLowerCase().includes(query.toLowerCase())),
+    );
+  }, [membersQuery.data, role, query]);
 
   const stats = useMemo(() => {
-    const active = members.filter((m) => m.isActive).length;
-    const leads = members.filter((m) => m.role === "Team Lead").length;
-    const agents = members.filter((m) => m.role === "Agent" || m.role === "Team Lead");
-    const avg = agents.length
-      ? Math.round(agents.reduce((sum, m) => sum + m.leadsHandled, 0) / agents.length)
-      : 0;
-    return {
-      total: members.length,
-      active,
-      teamLeads: leads,
-      avgLeads: avg,
-      teamCount: new Set(members.map((m) => m.team)).size,
-    };
-  }, [members]);
+    const members = membersQuery.data ?? [];
+    const byRole: Record<string, number> = {};
+    for (const m of members) byRole[m.role] = (byRole[m.role] ?? 0) + 1;
+    return { total: members.length, byRole };
+  }, [membersQuery.data]);
+
+  const addMutation = useMutation({
+    mutationFn: addOrgMemberByEmail,
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["org-members"] });
+      setDraft(emptyDraft);
+      setOpen(false);
+      toast.success(`${result.fullName ?? result.email} added to the team`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not add member"),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: removeOrgMember,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["org-members"] });
+      toast.success("Member removed");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not remove member"),
+  });
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (
-      !draft.name.trim() ||
-      !draft.email.trim() ||
-      !draft.phone.trim() ||
-      !draft.role ||
-      !draft.team
-    ) {
-      toast.error("Please fill in name, email, phone, role and team");
+    if (!draft.email.trim() || !draft.role) {
+      toast.error("Please fill in email and role");
       return;
     }
-    const member: TeamMember = {
-      id: `TM-${(members.length + 1).toString().padStart(2, "0")}`,
-      name: draft.name.trim(),
-      email: draft.email.trim(),
-      phone: draft.phone.trim(),
-      role: draft.role,
-      team: draft.team,
-      isActive: draft.isActive,
-      joinedAt: new Date().toLocaleDateString("en-GB").replaceAll("/", "-"),
-      leadsHandled: 0,
-    };
-    setMembers((prev) => [member, ...prev]);
-    toast.success(`${member.name} added to ${member.team}`);
-    setDraft(emptyDraft);
-    setOpen(false);
+    addMutation.mutate({ data: { email: draft.email.trim(), role: draft.role } });
   }
 
   return (
@@ -129,20 +115,21 @@ function TeamPage() {
     >
       <div className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat
-            label="Total Members"
-            value={String(stats.total)}
-            meta={`${stats.teamCount} teams`}
-          />
-          <Stat label="Active" value={String(stats.active)} meta="currently active" />
-          <Stat label="Team Leads" value={String(stats.teamLeads)} meta="managers" />
-          <Stat label="Avg Leads / Agent" value={String(stats.avgLeads)} meta="lifetime" />
+          <Stat label="Total Members" value={String(stats.total)} meta="in this org" />
+          {(["owner", "admin", "agent"] as const).map((r) => (
+            <Stat
+              key={r}
+              label={ORG_ROLE_LABELS[r]}
+              value={String(stats.byRole[r] ?? 0)}
+              meta="members"
+            />
+          ))}
         </div>
 
         <div className="rounded-2xl border border-border bg-card shadow-[var(--shadow-card)]">
           <div className="flex flex-wrap items-center gap-3 border-b border-border p-4">
             <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border bg-secondary/40 p-1.5">
-              {roles.map((r) => (
+              {roleFilters.map((r) => (
                 <button
                   key={r}
                   onClick={() => setRole(r)}
@@ -153,26 +140,23 @@ function TeamPage() {
                       : "text-muted-foreground hover:bg-secondary hover:text-foreground",
                   )}
                 >
-                  {r}
+                  {r === "All" ? "All" : ORG_ROLE_LABELS[r]}
                 </button>
               ))}
             </div>
-            <div className="relative min-w-[220px] flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by name, email or team"
-                className="h-10 w-full rounded-lg border border-input bg-background pl-9 pr-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/40"
-              />
-            </div>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or email"
+              className="h-10 min-w-[220px] flex-1 rounded-lg border border-input bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/40"
+            />
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] border-collapse text-sm">
+            <table className="w-full min-w-[800px] border-collapse text-sm">
               <thead>
                 <tr className="bg-table-head text-table-head-foreground">
-                  {["Member", "Contact", "Role", "Team", "Status", "Actions"].map((h) => (
+                  {["Member", "Email", "Role", "Joined", "Actions"].map((h) => (
                     <th
                       key={h}
                       className={cn(
@@ -186,89 +170,60 @@ function TeamPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((m) => (
-                  <tr
-                    key={m.id}
-                    className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70"
-                  >
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-                          {initials(m.name)}
-                        </span>
-                        <div className="min-w-0">
-                          <p className="truncate font-semibold">{m.name}</p>
-                          <p className="text-xs text-muted-foreground">Joined {m.joinedAt}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="text-xs text-muted-foreground">{m.email}</p>
-                      <p className="text-xs text-muted-foreground">{m.phone}</p>
-                    </td>
-                    <td className="px-4 py-3 font-medium">{m.role}</td>
-                    <td className="px-4 py-3 font-medium">{m.team}</td>
-                    <td className="px-4 py-3">
-                      <button
-                        role="switch"
-                        aria-checked={m.isActive}
-                        aria-label={`Status for ${m.name}`}
-                        onClick={() =>
-                          setMembers((prev) =>
-                            prev.map((x) => (x.id === m.id ? { ...x, isActive: !x.isActive } : x)),
-                          )
-                        }
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition-colors",
-                          m.isActive
-                            ? "bg-success/15 text-success hover:bg-success/25"
-                            : "bg-secondary text-muted-foreground hover:bg-accent",
-                        )}
-                      >
-                        <span className="size-1.5 rounded-full bg-current" />
-                        {m.isActive ? "Active" : "Inactive"}
-                      </button>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-end gap-1.5">
-                        {(
-                          [
-                            [Phone, "Call", "bg-info/15 text-info"],
-                            [MessageCircle, "WhatsApp", "bg-success/15 text-success"],
-                            [Mail, "Email", "bg-warning/20 text-warning"],
-                          ] as const
-                        ).map(([Icon, label, tone]) => (
-                          <button
-                            key={label}
-                            title={label}
-                            aria-label={`${label} ${m.name}`}
-                            onClick={() => toast.success(`${label} — ${m.name}`)}
-                            className={cn(
-                              "grid size-8 place-items-center rounded-md transition-transform hover:scale-105",
-                              tone,
-                            )}
-                          >
-                            <Icon className="size-4" />
-                          </button>
-                        ))}
-                        <button
-                          title="Remove"
-                          aria-label={`Remove ${m.name}`}
-                          onClick={() => {
-                            setMembers((prev) => prev.filter((x) => x.id !== m.id));
-                            toast.success(`${m.name} removed from the team`);
-                          }}
-                          className="grid size-8 place-items-center rounded-md bg-destructive/12 text-destructive transition-transform hover:scale-105"
-                        >
-                          <Trash2 className="size-4" />
-                        </button>
-                      </div>
+                {membersQuery.isLoading && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-16 text-center text-muted-foreground">
+                      Loading team...
                     </td>
                   </tr>
-                ))}
-                {rows.length === 0 && (
+                )}
+                {!membersQuery.isLoading &&
+                  rows.map((m) => (
+                    <tr
+                      key={m.id}
+                      className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70"
+                    >
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <span className="grid size-9 shrink-0 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                            {initials(m.user.fullName ?? m.user.email)}
+                          </span>
+                          <p className="truncate font-semibold">{m.user.fullName ?? "—"}</p>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground">{m.user.email}</td>
+                      <td className="px-4 py-3 font-medium">
+                        {ORG_ROLE_LABELS[m.role as OrgRoleValue]}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground">
+                        {new Date(m.createdAt).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end gap-1.5">
+                          <button
+                            title="Email"
+                            aria-label={`Email ${m.user.email}`}
+                            onClick={() => toast.success(`Email — ${m.user.email}`)}
+                            className="grid size-8 place-items-center rounded-md bg-warning/20 text-warning transition-transform hover:scale-105"
+                          >
+                            <Mail className="size-4" />
+                          </button>
+                          <button
+                            title="Remove"
+                            aria-label={`Remove ${m.user.email}`}
+                            onClick={() => removeMutation.mutate({ data: { orgMemberId: m.id } })}
+                            disabled={removeMutation.isPending}
+                            className="grid size-8 place-items-center rounded-md bg-destructive/12 text-destructive transition-transform hover:scale-105"
+                          >
+                            <Trash2 className="size-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                {!membersQuery.isLoading && rows.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-4 py-16 text-center text-muted-foreground">
+                    <td colSpan={5} className="px-4 py-16 text-center text-muted-foreground">
                       No team members match these filters.
                     </td>
                   </tr>
@@ -278,7 +233,7 @@ function TeamPage() {
           </div>
 
           <div className="border-t border-border px-4 py-3 text-sm text-muted-foreground">
-            Showing {rows.length} of {members.length} members
+            Showing {rows.length} of {(membersQuery.data ?? []).length} members
           </div>
         </div>
       </div>
@@ -290,119 +245,50 @@ function TeamPage() {
               <UsersRound className="size-4 text-primary" /> Add Member
             </DialogTitle>
             <DialogDescription>
-              Add an agent, team lead or manager to your sales organisation and assign them to a
-              team.
+              Add an existing Estatly account to this org. They need to have signed up already —
+              this isn't an email invite yet, just linking an existing account.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={submit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="member-name">
-                Full Name <span className="text-destructive">*</span>
+              <Label htmlFor="member-email">
+                Email <span className="text-destructive">*</span>
               </Label>
               <Input
-                id="member-name"
-                placeholder="e.g. Sneha Kulkarni"
-                value={draft.name}
-                onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                id="member-email"
+                type="email"
+                placeholder="name@example.com"
+                value={draft.email}
+                onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))}
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="member-email">
-                  Email <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="member-email"
-                  type="email"
-                  placeholder="name@estatly.crm"
-                  value={draft.email}
-                  onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="member-phone">
-                  Phone <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="member-phone"
-                  placeholder="+91 98765 43210"
-                  value={draft.phone}
-                  onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="member-role">
-                  Role <span className="text-destructive">*</span>
-                </Label>
-                <Select
-                  value={draft.role}
-                  onValueChange={(v) => setDraft((d) => ({ ...d, role: v as TeamRole }))}
-                >
-                  <SelectTrigger id="member-role">
-                    <SelectValue placeholder="Select role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(["Admin", "Manager", "Team Lead", "Agent"] as const).map((r) => (
-                      <SelectItem key={r} value={r}>
-                        {r}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="member-team">
-                  Team <span className="text-destructive">*</span>
-                </Label>
-                <Select
-                  value={draft.team}
-                  onValueChange={(v) => setDraft((d) => ({ ...d, team: v }))}
-                >
-                  <SelectTrigger id="member-team">
-                    <SelectValue placeholder="Select team" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {teams.map((t) => (
-                      <SelectItem key={t} value={t}>
-                        {t}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-border p-3">
-              <div>
-                <p className="text-sm font-medium">Active</p>
-                <p className="text-xs text-muted-foreground">
-                  Inactive members won't receive auto-assigned leads
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={draft.isActive}
-                onClick={() => setDraft((d) => ({ ...d, isActive: !d.isActive }))}
-                className={cn(
-                  "relative h-6 w-11 rounded-full transition-colors",
-                  draft.isActive ? "bg-primary" : "bg-muted-foreground/30",
-                )}
+            <div className="space-y-1.5">
+              <Label htmlFor="member-role">
+                Role <span className="text-destructive">*</span>
+              </Label>
+              <Select
+                value={draft.role}
+                onValueChange={(v) => setDraft((d) => ({ ...d, role: v as OrgRoleValue }))}
               >
-                <span
-                  className={cn(
-                    "absolute top-0.5 size-5 rounded-full bg-card shadow transition-all",
-                    draft.isActive ? "left-[22px]" : "left-0.5",
-                  )}
-                />
-              </button>
+                <SelectTrigger id="member-role">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  {ORG_ROLE_VALUES.map((r) => (
+                    <SelectItem key={r} value={r}>
+                      {ORG_ROLE_LABELS[r]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Add Member</Button>
+              <Button type="submit" disabled={addMutation.isPending}>
+                {addMutation.isPending ? "Adding..." : "Add Member"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

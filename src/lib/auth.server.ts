@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createSupabaseServerClient } from "./supabase/server";
 import { createSupabaseAdminClient } from "./supabase/admin.server";
 import { withUserContext } from "./db.server";
+import { requireUserId } from "./current-user.server";
 
 function slugify(name: string) {
   return name
@@ -120,3 +121,15 @@ export const getCurrentUser = createServerFn({ method: "GET" }).handler(async ()
     return { user, memberships };
   });
 });
+
+const updateProfileSchema = z.object({ fullName: z.string().min(1, "Full name is required") });
+
+/** Relies on the existing "users can update self" RLS policy (id = auth.uid()). */
+export const updateProfile = createServerFn({ method: "POST" })
+  .validator(updateProfileSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+    return withUserContext(userId, (tx) =>
+      tx.user.update({ where: { id: userId }, data: { fullName: data.fullName } }),
+    );
+  });

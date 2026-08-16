@@ -1,8 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Mail, Phone, Pencil, ShieldCheck, Users2, CalendarDays, Target } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Mail, Pencil, ShieldCheck, Building2, CalendarDays } from "lucide-react";
 import { AppShell, PrimaryAction, initials } from "@/components/crm/AppShell";
-import { agentReports, currentUser } from "@/data/crm";
+import { getCurrentUser, updateProfile } from "@/lib/auth.server";
+import { ORG_ROLE_LABELS, type OrgRoleValue } from "@/lib/org-role";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -20,34 +22,64 @@ export const Route = createFileRoute("/profile")({
   head: () => ({
     meta: [
       { title: "My Profile — Estatly Real Estate CRM" },
-      { name: "description", content: "View and edit your account details, role and activity." },
+      { name: "description", content: "View and edit your account details and org membership." },
       { property: "og:title", content: "My Profile — Estatly Real Estate CRM" },
-      { property: "og:description", content: "Your Estatly CRM profile and activity summary." },
+      { property: "og:description", content: "Your Estatly CRM profile." },
     ],
   }),
   component: ProfilePage,
 });
 
 function ProfilePage() {
-  const [profile, setProfile] = useState({
-    name: currentUser.name,
-    email: currentUser.email,
-    phone: currentUser.phone,
-  });
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(profile);
+  const [fullName, setFullName] = useState("");
 
-  const activity = agentReports.find((a) => a.user === currentUser.name);
+  const currentUserQuery = useQuery({
+    queryKey: ["current-user"],
+    queryFn: () => getCurrentUser(),
+  });
+  const user = currentUserQuery.data?.user;
+  const memberships = currentUserQuery.data?.memberships ?? [];
+  const primaryMembership = memberships[0];
+
+  const updateMutation = useMutation({
+    mutationFn: updateProfile,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["current-user"] });
+      setOpen(false);
+      toast.success("Profile updated");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update profile"),
+  });
 
   function save(e: React.FormEvent) {
     e.preventDefault();
-    if (!draft.name.trim()) {
+    if (!fullName.trim()) {
       toast.error("Full name is required");
       return;
     }
-    setProfile(draft);
-    setOpen(false);
-    toast.success("Profile updated");
+    updateMutation.mutate({ data: { fullName: fullName.trim() } });
+  }
+
+  if (currentUserQuery.isLoading) {
+    return (
+      <AppShell title="My Profile">
+        <div className="grid place-items-center py-24 text-sm text-muted-foreground">
+          Loading...
+        </div>
+      </AppShell>
+    );
+  }
+
+  if (!user) {
+    return (
+      <AppShell title="My Profile">
+        <div className="grid place-items-center py-24 text-sm text-muted-foreground">
+          Not signed in — go to /sign-in.
+        </div>
+      </AppShell>
+    );
   }
 
   return (
@@ -57,7 +89,7 @@ function ProfilePage() {
         <PrimaryAction
           label="Edit Profile"
           onClick={() => {
-            setDraft(profile);
+            setFullName(user.fullName ?? "");
             setOpen(true);
           }}
         />
@@ -67,91 +99,56 @@ function ProfilePage() {
         <div className="rounded-2xl border border-border bg-card p-6 shadow-[var(--shadow-card)] lg:col-span-1">
           <div className="flex flex-col items-center text-center">
             <span className="grid size-20 place-items-center rounded-full bg-primary text-2xl font-bold text-primary-foreground">
-              {initials(profile.name)}
+              {initials(user.fullName ?? user.email)}
             </span>
-            <h2 className="mt-4 text-lg font-bold">{profile.name}</h2>
-            <p className="text-sm text-muted-foreground">
-              {currentUser.role} · {currentUser.team}
-            </p>
-            <span
-              className={
-                currentUser.isActive
-                  ? "mt-3 inline-flex items-center gap-1.5 rounded-full bg-success/15 px-3 py-1 text-xs font-semibold text-success"
-                  : "mt-3 inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-muted-foreground"
-              }
-            >
-              <span className="size-1.5 rounded-full bg-current" />
-              {currentUser.isActive ? "Active" : "Inactive"}
-            </span>
+            <h2 className="mt-4 text-lg font-bold">{user.fullName ?? user.email}</h2>
+            {primaryMembership && (
+              <p className="text-sm text-muted-foreground">
+                {ORG_ROLE_LABELS[primaryMembership.role as OrgRoleValue]} ·{" "}
+                {primaryMembership.organization.name}
+              </p>
+            )}
           </div>
 
           <div className="mt-6 space-y-3 border-t border-border pt-5 text-sm">
             <div className="flex items-center gap-3">
               <Mail className="size-4 shrink-0 text-muted-foreground" />
-              <span className="truncate">{profile.email}</span>
+              <span className="truncate">{user.email}</span>
             </div>
-            <div className="flex items-center gap-3">
-              <Phone className="size-4 shrink-0 text-muted-foreground" />
-              <span>{profile.phone}</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <ShieldCheck className="size-4 shrink-0 text-muted-foreground" />
-              <span>{currentUser.role}</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <Users2 className="size-4 shrink-0 text-muted-foreground" />
-              <span>{currentUser.team}</span>
-            </div>
+            {primaryMembership && (
+              <>
+                <div className="flex items-center gap-3">
+                  <ShieldCheck className="size-4 shrink-0 text-muted-foreground" />
+                  <span>{ORG_ROLE_LABELS[primaryMembership.role as OrgRoleValue]}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Building2 className="size-4 shrink-0 text-muted-foreground" />
+                  <span>{primaryMembership.organization.name}</span>
+                </div>
+              </>
+            )}
             <div className="flex items-center gap-3">
               <CalendarDays className="size-4 shrink-0 text-muted-foreground" />
-              <span>Joined {currentUser.joinedAt}</span>
+              <span>Joined {new Date(user.createdAt).toLocaleDateString()}</span>
             </div>
           </div>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Stat
-              label="Leads Handled"
-              value={currentUser.leadsHandled.toLocaleString()}
-              meta="lifetime"
-            />
-            <Stat
-              label="Calls Today"
-              value={String(activity?.calls ?? 0)}
-              meta={`${activity?.uniqueCalls ?? 0} unique`}
-            />
-            <Stat label="WhatsApp Sent" value={String(activity?.whatsapp ?? 0)} meta="today" />
-            <Stat label="Notes Added" value={String(activity?.notes ?? 0)} meta="today" />
-          </div>
-
-          <div className="rounded-2xl border border-border bg-card p-5 shadow-[var(--shadow-card)]">
-            <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <Target className="size-4 text-primary" /> Today's Activity
-            </h3>
-            <dl className="mt-4 grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
-              <Field label="Working Hours" value={activity?.workingHours ?? "—"} />
-              <Field label="Status Edits" value={String(activity?.statusEdits ?? 0)} />
-              <Field label="Form Edits" value={String(activity?.formEdits ?? 0)} />
-              <Field label="Emails" value={String(activity?.email ?? 0)} />
-              <Field label="SMS" value={String(activity?.sms ?? 0)} />
-              <Field label="Status" value={activity?.active ? "Active" : "Inactive"} />
-            </dl>
-          </div>
-
           <div className="rounded-2xl border border-border bg-card p-5 shadow-[var(--shadow-card)]">
             <h3 className="text-sm font-semibold">Account</h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              Role and team are managed by your organisation admin from the Team page.
+              Your role and organization are managed by your org's owner or admin from the Team
+              page.
             </p>
             <button
               onClick={() => {
-                setDraft(profile);
+                setFullName(user.fullName ?? "");
                 setOpen(true);
               }}
               className="mt-4 inline-flex items-center gap-2 rounded-lg border border-input px-3.5 py-2 text-sm font-medium transition-colors hover:bg-secondary"
             >
-              <Pencil className="size-4" /> Edit contact details
+              <Pencil className="size-4" /> Edit name
             </button>
           </div>
         </div>
@@ -161,62 +158,30 @@ function ProfilePage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Profile</DialogTitle>
-            <DialogDescription>Update your name, email and phone number.</DialogDescription>
+            <DialogDescription>
+              Update your display name. Email is tied to your login and can't be changed here.
+            </DialogDescription>
           </DialogHeader>
           <form onSubmit={save} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="profile-name">Full Name</Label>
               <Input
                 id="profile-name"
-                value={draft.name}
-                onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="profile-email">Email</Label>
-              <Input
-                id="profile-email"
-                type="email"
-                value={draft.email}
-                onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="profile-phone">Phone</Label>
-              <Input
-                id="profile-phone"
-                value={draft.phone}
-                onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
               />
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Save changes</Button>
+              <Button type="submit" disabled={updateMutation.isPending}>
+                {updateMutation.isPending ? "Saving..." : "Save changes"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
     </AppShell>
-  );
-}
-
-function Stat({ label, value, meta }: { label: string; value: string; meta: string }) {
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 transition-shadow hover:shadow-[var(--shadow-card)]">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-1 text-2xl font-bold tabular-nums">{value}</p>
-      <p className="mt-1 text-xs text-muted-foreground">{meta}</p>
-    </div>
-  );
-}
-
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="font-medium">{value}</dd>
-    </div>
   );
 }

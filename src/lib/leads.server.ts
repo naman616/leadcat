@@ -1,12 +1,26 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
-import { withUserContext } from "./db.server";
+import { withUserContext, type Tx } from "./db.server";
 import { requireUserId, requirePrimaryOrgId } from "./current-user.server";
 import { LEAD_STATUS_VALUES } from "./lead-status";
 
 const assigneeSelect = { id: true, fullName: true, email: true } as const;
 const contactSelect = { id: true, fullName: true, phone: true, email: true, city: true } as const;
+
+/**
+ * assignedTo is only FK-constrained to users(id) — any user in the system,
+ * not org-scoped — so without this, a caller could set it to a real user
+ * id outside the org (no data leak, since that user's row is still
+ * invisible to teammates who don't share an org with them, but it's a
+ * silent data-integrity gap rather than a rejected input).
+ */
+async function requireOrgMember(tx: Tx, orgId: string, targetUserId: string) {
+  const membership = await tx.orgMember.findFirst({ where: { orgId, userId: targetUserId } });
+  if (!membership) {
+    throw new Error("That user isn't a member of this organization");
+  }
+}
 
 export const listLeads = createServerFn({ method: "GET" })
   .validator(
@@ -102,11 +116,16 @@ export const createLead = createServerFn({ method: "POST" })
         },
       });
 
-      const lead = await tx.lead.create({
+      // Always created unassigned, then optionally assigned as a separate
+      // step below — see the comment in reassignLead for why the order
+      // matters: app.can_manage_lead's "unassigned" branch passes for any
+      // org member, which is what lets a freshly-created lead be assigned
+      // to any teammate regardless of who's creating it.
+      let lead = await tx.lead.create({
         data: {
           orgId,
           contactId: contact.id,
-          assignedTo: data.assignedTo ?? null,
+          assignedTo: null,
           source: data.source ?? null,
           subSource: data.subSource ?? null,
           project: data.project ?? null,
@@ -122,8 +141,14 @@ export const createLead = createServerFn({ method: "POST" })
       });
 
       if (data.assignedTo) {
+        await requireOrgMember(tx, orgId, data.assignedTo);
         await tx.leadAssignment.create({
           data: { orgId, leadId: lead.id, assignedTo: data.assignedTo, assignedBy: userId },
+        });
+        lead = await tx.lead.update({
+          where: { id: lead.id },
+          data: { assignedTo: data.assignedTo },
+          include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
         });
       }
 
@@ -206,22 +231,33 @@ export const reassignLead = createServerFn({ method: "POST" })
     const userId = await requireUserId();
 
     return withUserContext(userId, async (tx) => {
-      const lead = await tx.lead.update({
-        where: { id: data.leadId },
-        data: { assignedTo: data.assignedTo },
-        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
-      });
-
+      // Recording the assignment must happen BEFORE updating leads.assigned_to,
+      // not after. app.can_manage_lead (the RLS check on both this insert and
+      // the update below) re-queries leads live, so it needs to see the
+      // lead's state as it stood before this handoff — not after — or a
+      // non-admin handing a lead to a named colleague (rather than to
+      // themselves or to nobody) always fails: by the time the insert's
+      // check ran against the already-updated row, the caller would no
+      // longer be recognized as the assignee of record. Caught by an
+      // independent review; see docs/specs/01-leads.md.
       if (data.assignedTo) {
+        const existing = await tx.lead.findUniqueOrThrow({ where: { id: data.leadId } });
+        await requireOrgMember(tx, existing.orgId, data.assignedTo);
         await tx.leadAssignment.create({
           data: {
-            orgId: lead.orgId,
-            leadId: lead.id,
+            orgId: existing.orgId,
+            leadId: existing.id,
             assignedTo: data.assignedTo,
             assignedBy: userId,
           },
         });
       }
+
+      const lead = await tx.lead.update({
+        where: { id: data.leadId },
+        data: { assignedTo: data.assignedTo },
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+      });
 
       await tx.leadActivity.create({
         data: {
@@ -231,6 +267,49 @@ export const reassignLead = createServerFn({ method: "POST" })
           body: data.assignedTo
             ? `Reassigned to ${lead.assignee?.fullName ?? "agent"}`
             : "Unassigned",
+          createdBy: userId,
+        },
+      });
+
+      return lead;
+    });
+  });
+
+const setNextActionSchema = z.object({
+  leadId: z.string().uuid(),
+  // A real ISO 8601 UTC string (client converts the datetime-local input's
+  // timezone-less value using the browser's own timezone before sending —
+  // see leads.tsx — so this is unambiguous regardless of the server's
+  // timezone), or null to clear.
+  nextActionAt: z.string().datetime().nullable(),
+});
+
+export const setNextAction = createServerFn({ method: "POST" })
+  .validator(setNextActionSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+
+    let parsed: Date | null = null;
+    if (data.nextActionAt) {
+      parsed = new Date(data.nextActionAt);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error("Invalid date");
+      }
+    }
+
+    return withUserContext(userId, async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id: data.leadId },
+        data: { nextActionAt: parsed },
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+      });
+
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "system",
+          body: parsed ? `Follow-up scheduled for ${parsed.toLocaleString()}` : "Follow-up cleared",
           createdBy: userId,
         },
       });

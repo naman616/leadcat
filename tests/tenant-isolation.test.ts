@@ -60,6 +60,15 @@ const orgB = { id: randomUUID(), name: "Org B Realty", slug: `org-b-${run}` };
 const userA = { id: randomUUID(), email: `user-a-${run}@example.com` };
 const userB = { id: randomUUID(), email: `user-b-${run}@example.com` };
 
+// Extra users for the role-escalation / same-org-stealing / handoff /
+// org-pinning regression tests below — see docs/specs/01-leads.md for the
+// bugs these were written to catch.
+const userA2 = { id: randomUUID(), email: `user-a2-${run}@example.com` }; // admin in orgA (userA is owner)
+const userB2 = { id: randomUUID(), email: `user-b2-${run}@example.com` }; // agent in orgB, not assigned leadB
+const userMulti = { id: randomUUID(), email: `user-multi-${run}@example.com` }; // agent in BOTH orgs
+const agentX = { id: randomUUID(), email: `agent-x-${run}@example.com` }; // agent in orgA
+const agentY = { id: randomUUID(), email: `agent-y-${run}@example.com` }; // agent in orgA
+
 const contactA = { id: randomUUID(), orgId: orgA.id, fullName: "Contact A" };
 const contactB = { id: randomUUID(), orgId: orgB.id, fullName: "Contact B" };
 // leadA starts unassigned on purpose — this is what exercises the
@@ -67,17 +76,25 @@ const contactB = { id: randomUUID(), orgId: orgB.id, fullName: "Contact B" };
 // caught, documented in docs/specs/01-leads.md).
 const leadA = { id: randomUUID(), orgId: orgA.id, contactId: contactA.id };
 const leadB = { id: randomUUID(), orgId: orgB.id, contactId: contactB.id, assignedTo: userB.id };
+// Dedicated, unassigned leads so the tests below don't depend on execution
+// order / side effects of other tests touching leadA.
+const leadForOrgPinTest = { id: randomUUID(), orgId: orgA.id, contactId: contactA.id };
+const leadForHandoff = {
+  id: randomUUID(),
+  orgId: orgA.id,
+  contactId: contactA.id,
+  assignedTo: agentX.id,
+};
 
 beforeAll(async () => {
   // Seeded as the connection's base role (postgres superuser in the test
   // container), which bypasses RLS — the equivalent of the one audited
   // service-role admin path in real Supabase.
+  const allUsers = [userA, userB, userA2, userB2, userMulti, agentX, agentY];
   await prisma.$executeRawUnsafe(
-    `INSERT INTO auth.users (id, email) VALUES ($1::uuid, $2), ($3::uuid, $4)`,
-    userA.id,
-    userA.email,
-    userB.id,
-    userB.email,
+    `INSERT INTO auth.users (id, email) SELECT * FROM UNNEST($1::uuid[], $2::text[])`,
+    allUsers.map((u) => u.id),
+    allUsers.map((u) => u.email),
   );
 
   await prisma.organization.createMany({ data: [orgA, orgB] });
@@ -86,21 +103,24 @@ beforeAll(async () => {
     data: [
       { orgId: orgA.id, userId: userA.id, role: "owner" },
       { orgId: orgB.id, userId: userB.id, role: "owner" },
+      { orgId: orgA.id, userId: userA2.id, role: "admin" },
+      { orgId: orgB.id, userId: userB2.id, role: "agent" },
+      { orgId: orgA.id, userId: userMulti.id, role: "agent" },
+      { orgId: orgB.id, userId: userMulti.id, role: "agent" },
+      { orgId: orgA.id, userId: agentX.id, role: "agent" },
+      { orgId: orgA.id, userId: agentY.id, role: "agent" },
     ],
   });
 
   await prisma.contact.createMany({ data: [contactA, contactB] });
-  await prisma.lead.createMany({ data: [leadA, leadB] });
+  await prisma.lead.createMany({ data: [leadA, leadB, leadForOrgPinTest, leadForHandoff] });
 });
 
 afterAll(async () => {
   // auth.users FK is ON DELETE CASCADE into public.users/org_members; org
   // FK cascades into contacts/leads/lead_activities/lead_assignments.
-  await prisma.$executeRawUnsafe(
-    `DELETE FROM auth.users WHERE id IN ($1::uuid, $2::uuid)`,
-    userA.id,
-    userB.id,
-  );
+  const allUserIds = [userA, userB, userA2, userB2, userMulti, agentX, agentY].map((u) => u.id);
+  await prisma.$executeRawUnsafe(`DELETE FROM auth.users WHERE id = ANY($1::uuid[])`, allUserIds);
   await prisma.organization.deleteMany({ where: { id: { in: [orgA.id, orgB.id] } } });
   await prisma.$disconnect();
 });
@@ -122,9 +142,11 @@ describe("tenant isolation", () => {
   });
 
   it("isolates org_members the same way", async () => {
+    // orgB has 3 members (userB, userB2, userMulti) — all visible to userB,
+    // and none of orgA's members should leak through.
     const seenByB = await asUser(userB.id, (tx) => tx.orgMember.findMany());
-    expect(seenByB).toHaveLength(1);
-    expect(seenByB[0]?.orgId).toBe(orgB.id);
+    expect(seenByB.every((m) => m.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((m) => m.userId).sort()).toEqual([userB.id, userB2.id, userMulti.id].sort());
 
     const crossOrgLookup = await asUser(userB.id, (tx) =>
       tx.orgMember.findMany({ where: { orgId: orgA.id } }),
@@ -215,5 +237,98 @@ describe("lead management isolation", () => {
 
     expect(activitiesSeenByA).toHaveLength(0);
     expect(assignmentsSeenByA).toHaveLength(0);
+  });
+});
+
+// These all cover findings from an independent security review — each one
+// maps to a specific gap that review caught, listed in docs/specs/01-leads.md
+// and in the migration comments for 20260815143031_fix_role_escalation_and_org_pinning.
+describe("org governance and lead-handoff regressions", () => {
+  it("a plain admin cannot promote themselves (or anyone) to owner", async () => {
+    // userA2 is 'admin' in orgA — is_org_admin() is true for them, which
+    // used to be the only check on org_members writes. This is exactly the
+    // exploit: an admin escalating their own row to 'owner'.
+    //
+    // Postgres RLS note: USING sees this row is theirs and lets it through
+    // (a plain admin CAN normally update their own row), but WITH CHECK
+    // rejects the resulting role='owner' value — so this is a hard error,
+    // not a silent 0-row match. That's only the case because USING passed;
+    // compare to the DELETE test below, which has no WITH CHECK at all, so
+    // an ineligible row is just never matched (count: 0, no error).
+    await expect(
+      asUser(userA2.id, (tx) =>
+        tx.orgMember.updateMany({
+          where: { orgId: orgA.id, userId: userA2.id },
+          data: { role: "owner" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a plain admin cannot remove the org's owner", async () => {
+    const result = await asUser(userA2.id, (tx) =>
+      tx.orgMember.deleteMany({ where: { orgId: orgA.id, userId: userA.id } }),
+    );
+    expect(result.count).toBe(0);
+  });
+
+  it("the sole owner cannot demote themselves away from owner", async () => {
+    // Guards against an org ending up with zero owners — after this,
+    // nobody could ever grant owner-level permission again. Same USING-
+    // passes-but-WITH-CHECK-fails shape as the promotion test above: the
+    // owner can normally update their own row, so this is a hard error.
+    await expect(
+      asUser(userA.id, (tx) =>
+        tx.orgMember.updateMany({
+          where: { orgId: orgA.id, userId: userA.id },
+          data: { role: "admin" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("org_id cannot be changed on an existing lead, even by a member of both orgs", async () => {
+    // userMulti belongs to both orgA and orgB — exactly the case the old
+    // WITH CHECK (is_org_member(new org_id)) let through, since it only
+    // checked the new org_id was *some* org they belonged to, never that
+    // it matched the row's existing org_id.
+    await expect(
+      asUser(userMulti.id, (tx) =>
+        tx.lead.update({ where: { id: leadForOrgPinTest.id }, data: { orgId: orgB.id } }),
+      ),
+    ).rejects.toThrow(/org_id cannot be changed/);
+  });
+
+  it("a non-admin cannot steal a colleague's already-assigned lead in the same org", async () => {
+    // leadB is assigned to userB. userB2 is a same-org agent — not an
+    // admin, not the current assignee — trying to grab it for themselves.
+    const result = await asUser(userB2.id, (tx) =>
+      tx.lead.updateMany({ where: { id: leadB.id }, data: { assignedTo: userB2.id } }),
+    );
+    expect(result.count).toBe(0);
+  });
+
+  it("a non-admin CAN hand off their own lead to a named colleague", async () => {
+    // Regression test for the bug this exact scenario used to trip:
+    // recording the assignment BEFORE updating the lead (mirroring the
+    // fixed order in reassignLead) must succeed for two ordinary agents —
+    // this used to fail because can_manage_lead re-queries leads live, and
+    // used to be checked against the lead's state *after* it had already
+    // been reassigned away from the caller.
+    const updated = await asUser(agentX.id, async (tx) => {
+      await tx.leadAssignment.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadForHandoff.id,
+          assignedTo: agentY.id,
+          assignedBy: agentX.id,
+        },
+      });
+      return tx.lead.update({
+        where: { id: leadForHandoff.id },
+        data: { assignedTo: agentY.id },
+      });
+    });
+    expect(updated.assignedTo).toBe(agentY.id);
   });
 });

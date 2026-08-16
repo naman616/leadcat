@@ -22,8 +22,12 @@ export async function requireUserId(): Promise<string> {
  * this can't be a raw prisma call; it would just fail, not bypass RLS.
  */
 export async function requirePrimaryOrgId(userId: string): Promise<string> {
+  // orderBy is required, not cosmetic — without it, Postgres gives no row
+  // ordering guarantee, so a multi-org user's "primary" org would be
+  // effectively undefined (could differ between calls). Oldest membership
+  // first is the least surprising choice: the org they joined earliest.
   const membership = await withUserContext(userId, (tx) =>
-    tx.orgMember.findFirst({ where: { userId } }),
+    tx.orgMember.findFirst({ where: { userId }, orderBy: { createdAt: "asc" } }),
   );
   if (!membership) {
     throw new Error("You don't belong to an organization yet");

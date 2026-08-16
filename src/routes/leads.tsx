@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronLeft,
@@ -16,7 +16,7 @@ import {
   UserRoundCheck,
   X,
 } from "lucide-react";
-import { LEAD_STATUS_VALUES, type LeadStatusValue } from "@/lib/lead-status";
+import { LEAD_STATUS_VALUES, LEAD_STATUS_LABELS, LEAD_STATUS_TONE } from "@/lib/lead-status";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
 import {
   leadBudgets,
@@ -34,6 +34,7 @@ import {
   reassignLead,
   updateLeadStatus,
   addLeadNote,
+  setNextAction,
 } from "@/lib/leads.server";
 import { listOrgMembers } from "@/lib/org-members.server";
 import { getCurrentUser } from "@/lib/auth.server";
@@ -57,6 +58,9 @@ import {
 } from "@/components/ui/select";
 
 export const Route = createFileRoute("/leads")({
+  validateSearch: (search: Record<string, unknown>): { leadId?: string | undefined } => ({
+    leadId: typeof search["leadId"] === "string" ? search["leadId"] : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Manage Leads — Estatly Real Estate CRM" },
@@ -76,23 +80,8 @@ export const Route = createFileRoute("/leads")({
   component: LeadsPage,
 });
 
-const statusLabels: Record<LeadStatusValue, string> = {
-  New: "New",
-  Callback: "Callback",
-  FollowUp: "Follow Up",
-  SiteVisit: "Site Visit",
-  Booked: "Booked",
-  Dropped: "Dropped",
-};
-
-const statusTone: Record<LeadStatusValue, string> = {
-  New: "text-info",
-  Callback: "text-warning",
-  FollowUp: "text-info",
-  SiteVisit: "text-primary",
-  Booked: "text-success",
-  Dropped: "text-destructive",
-};
+const statusLabels = LEAD_STATUS_LABELS;
+const statusTone = LEAD_STATUS_TONE;
 
 const tabs = ["All", "My Leads", "Unassigned"] as const;
 const statusFilters = ["All", ...LEAD_STATUS_VALUES] as const;
@@ -111,13 +100,16 @@ const emptyDraft = {
 };
 
 function LeadsPage() {
+  const search = Route.useSearch();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [status, setStatus] = useState<(typeof statusFilters)[number]>("All");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
-  const [previewId, setPreviewId] = useState<string | null>(null);
+  // Deep-linked from Tasks (?leadId=...) — opens straight to that lead's
+  // preview. Falls back to nothing selected for a normal /leads visit.
+  const [previewId, setPreviewId] = useState<string | null>(search.leadId ?? null);
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
   const perPage = 10;
@@ -690,6 +682,7 @@ function LeadPreview({
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof previewTabs)[number]>("Overview");
   const [noteText, setNoteText] = useState("");
+  const nextActionInputRef = useRef<HTMLInputElement>(null);
 
   const leadQuery = useQuery({
     queryKey: ["lead", leadId],
@@ -717,6 +710,18 @@ function LeadPreview({
       toast.success("Lead re-assigned");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not reassign"),
+  });
+
+  const nextActionMutation = useMutation({
+    mutationFn: setNextAction,
+    onSuccess: (_, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      toast.success(variables.data.nextActionAt ? "Follow-up scheduled" : "Follow-up cleared");
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Could not update follow-up"),
   });
 
   const noteMutation = useMutation({
@@ -838,6 +843,58 @@ function LeadPreview({
                           <p className="mt-2 text-sm text-muted-foreground">
                             {lead.subStatus ?? "—"}
                           </p>
+                        </div>
+                      </Section>
+                      <Section title="Follow-up">
+                        <div className="flex items-center gap-2 rounded-xl border border-border p-3">
+                          <input
+                            key={lead.id}
+                            ref={nextActionInputRef}
+                            type="datetime-local"
+                            defaultValue={toDateTimeLocalValue(lead.nextActionAt)}
+                            className="h-9 flex-1 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus:ring-2 focus:ring-ring/40"
+                          />
+                          <button
+                            onClick={() => {
+                              const value = nextActionInputRef.current?.value;
+                              if (!value) {
+                                toast.error("Pick a date and time first");
+                                return;
+                              }
+                              // The datetime-local input's value has no
+                              // timezone designator. Converting to a real
+                              // ISO string here, in the browser, uses the
+                              // browser's own local timezone — parsing
+                              // that same naive string server-side would
+                              // instead use the server's timezone, which
+                              // for an India-focused app on a UTC server
+                              // would silently store times 5.5 hours off
+                              // from what was actually picked.
+                              const isoValue = new Date(value).toISOString();
+                              nextActionMutation.mutate({
+                                data: { leadId: lead.id, nextActionAt: isoValue },
+                              });
+                            }}
+                            disabled={nextActionMutation.isPending}
+                            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                          >
+                            <Clock3 className="size-3.5" /> Save
+                          </button>
+                          {lead.nextActionAt && (
+                            <button
+                              onClick={() =>
+                                nextActionMutation.mutate({
+                                  data: { leadId: lead.id, nextActionAt: null },
+                                })
+                              }
+                              disabled={nextActionMutation.isPending}
+                              className="grid size-9 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-secondary"
+                              aria-label="Clear follow-up"
+                              title="Clear"
+                            >
+                              <X className="size-4" />
+                            </button>
+                          )}
                         </div>
                       </Section>
                       <Section title="Assign To">
@@ -986,4 +1043,13 @@ function Field({ label, value }: { label: string; value: string }) {
       <dd className="truncate font-medium">{value}</dd>
     </div>
   );
+}
+
+/** For pre-filling an <input type="datetime-local">'s defaultValue. */
+function toDateTimeLocalValue(value: string | Date | null | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
