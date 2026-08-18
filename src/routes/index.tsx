@@ -55,7 +55,8 @@ function Dashboard() {
     return (
       <AppShell title="Dashboard">
         <div className="grid place-items-center py-24 text-sm text-destructive">
-          Couldn't load dashboard data.
+          Couldn't load dashboard data.{" "}
+          {statsQuery.error instanceof Error ? statsQuery.error.message : ""}
         </div>
       </AppShell>
     );

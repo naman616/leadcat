@@ -26,6 +26,19 @@ export type Tx = Prisma.TransactionClient;
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Prisma's interactive-transaction default is 5000ms (maxWait 2000ms) —
+// tuned for a same-region app-to-DB hop, not a pooled connection over a
+// slow/high-latency path (a VPN, a distant Supabase region, campus wifi).
+// Under those conditions the *query* isn't actually hanging — the round
+// trips just legitimately take longer than 5s cumulative — so Prisma's own
+// bookkeeping aborted a transaction that would otherwise have finished,
+// surfacing as "Transaction already closed" rather than any RLS or query
+// bug. This is generous on purpose: it should never be the thing that
+// fails on a normal connection, only ever a backstop against a truly
+// hung query.
+const TRANSACTION_TIMEOUT_MS = 20_000;
+const TRANSACTION_MAX_WAIT_MS = 10_000;
+
 export async function withUserContext<T>(userId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   // userId is string-interpolated into raw SQL below (SET LOCAL doesn't
   // support bind parameters). Supabase's auth.uid() is always a UUID, so
@@ -34,19 +47,25 @@ export async function withUserContext<T>(userId: string, fn: (tx: Tx) => Promise
   if (!UUID_RE.test(userId)) {
     throw new Error(`withUserContext: "${userId}" is not a valid UUID`);
   }
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL ROLE authenticated`);
-    await tx.$executeRawUnsafe(
-      `SET LOCAL "request.jwt.claims" TO '${JSON.stringify({ sub: userId, role: "authenticated" })}'`,
-    );
-    return fn(tx);
-  });
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE authenticated`);
+      await tx.$executeRawUnsafe(
+        `SET LOCAL "request.jwt.claims" TO '${JSON.stringify({ sub: userId, role: "authenticated" })}'`,
+      );
+      return fn(tx);
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  );
 }
 
 /** Same idea, for a request with no authenticated user. */
 export async function withAnonContext<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
-    return fn(tx);
-  });
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+      return fn(tx);
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  );
 }
