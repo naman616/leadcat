@@ -25,6 +25,9 @@ model Organization {
   leads       Lead[]
   activities  LeadActivity[]
   assignments LeadAssignment[]
+  projects    Project[]
+  towers      Tower[]
+  units       Unit[]
 
   @@map("organizations")
 }
@@ -198,4 +201,85 @@ model LeadAssignment {
   assignedByUser User?        @relation("AssignmentAssignedBy", fields: [assignedBy], references: [id], onDelete: SetNull)
 
   @@map("lead_assignments")
+}
+
+enum ProjectType {
+  Residential
+  Commercial
+  Agricultural
+
+  @@map("project_type")
+}
+
+enum UnitStatus {
+  Available
+  Blocked
+  Booked
+  Registered
+
+  @@map("unit_status")
+}
+
+/// A developer/builder project. See docs/specs/02-inventory.md — no
+/// separate `developers` entity yet; `Organization` is the tenant boundary
+/// and there's no current product need to model multiple developers under
+/// one org. starting_price / unit_config_summary are display-only free
+/// text (matches the pre-existing mock UI), not derived from real units.
+model Project {
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String      @map("org_id") @db.Uuid
+  name              String
+  city              String
+  type              ProjectType
+  startingPrice     String?     @map("starting_price")
+  unitConfigSummary String?     @map("unit_config_summary")
+  createdAt         DateTime    @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  towers       Tower[]
+  units        Unit[]
+
+  @@map("projects")
+}
+
+/// A tower/phase within a project. Cheap to model now, painful to
+/// retrofit later — same reasoning as leads' attribution columns — even
+/// though this slice only lets you create one inline from the Add Unit
+/// dialog, not manage them separately.
+model Tower {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  units        Unit[]
+
+  @@map("towers")
+}
+
+/// The sellable inventory unit. `towerId` is nullable — plotted/villa-style
+/// projects may have no tower. `area` is one free-text field, not the full
+/// carpet/built-up/super split from the build plan §1.1.C; that precision
+/// isn't needed until someone asks for it.
+model Unit {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String     @map("org_id") @db.Uuid
+  projectId     String     @map("project_id") @db.Uuid
+  towerId       String?    @map("tower_id") @db.Uuid
+  unitNumber    String     @map("unit_number")
+  configuration String?
+  floor         String?
+  area          String?
+  price         String?
+  status        UnitStatus @default(Available)
+  createdAt     DateTime   @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tower        Tower?       @relation(fields: [towerId], references: [id], onDelete: SetNull)
+
+  @@map("units")
 }

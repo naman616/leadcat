@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Building2,
   Copy,
@@ -12,7 +13,8 @@ import {
   Upload,
 } from "lucide-react";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
-import { projectList as seedProjects, type Project } from "@/data/crm";
+import { PROJECT_TYPE_VALUES, type ProjectTypeValue } from "@/lib/inventory-enums";
+import { createProject, listProjects } from "@/lib/inventory.server";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -46,32 +48,32 @@ export const Route = createFileRoute("/projects")({
       { property: "og:title", content: "Manage Projects — Estatly Real Estate CRM" },
       {
         property: "og:description",
-        content: "Project inventory with availability toggles and matching-lead counts.",
+        content: "Project inventory with live unit availability and matching-lead counts.",
       },
     ],
   }),
   component: ProjectsPage,
 });
 
-const types = ["All", "Residential", "Commercial", "Agricultural"] as const;
+const types = ["All", ...PROJECT_TYPE_VALUES] as const;
 
 const emptyDraft = {
   name: "",
   city: "",
-  type: "" as Project["type"] | "",
-  price: "",
-  units: "",
+  type: "" as ProjectTypeValue | "",
+  startingPrice: "",
+  unitConfigSummary: "",
 };
 
 function ProjectsPage() {
-  const [projectList, setProjectList] = useState<Project[]>(seedProjects);
+  const queryClient = useQueryClient();
   const [type, setType] = useState<(typeof types)[number]>("All");
   const [query, setQuery] = useState("");
-  const [availability, setAvailability] = useState<Record<string, boolean>>(
-    Object.fromEntries(seedProjects.map((p) => [p.id, p.available])),
-  );
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
+
+  const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: () => listProjects() });
+  const projectList = useMemo(() => projectsQuery.data ?? [], [projectsQuery.data]);
 
   const rows = useMemo(
     () =>
@@ -84,28 +86,32 @@ function ProjectsPage() {
     [projectList, type, query],
   );
 
+  const createProjectMutation = useMutation({
+    mutationFn: createProject,
+    onSuccess: (project) => {
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      setDraft(emptyDraft);
+      setAddOpen(false);
+      toast.success(`${project.name} added to Projects`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not add project"),
+  });
+
   function submitProject(e: React.FormEvent) {
     e.preventDefault();
     if (!draft.name.trim() || !draft.city.trim() || !draft.type) {
       toast.error("Please fill in name, city and type");
       return;
     }
-    const project: Project = {
-      id: `P-${(projectList.length + 1).toString().padStart(2, "0")}`,
-      name: draft.name.trim(),
-      city: draft.city.trim(),
-      type: draft.type,
-      dataCount: 0,
-      matching: 0,
-      available: true,
-      price: draft.price.trim() || "Price on request",
-      units: draft.units.trim() || "—",
-    };
-    setProjectList((prev) => [project, ...prev]);
-    setAvailability((a) => ({ ...a, [project.id]: true }));
-    setDraft(emptyDraft);
-    setAddOpen(false);
-    toast.success(`${project.name} added to Projects`);
+    createProjectMutation.mutate({
+      data: {
+        name: draft.name.trim(),
+        city: draft.city.trim(),
+        type: draft.type,
+        startingPrice: draft.startingPrice.trim() || undefined,
+        unitConfigSummary: draft.unitConfigSummary.trim() || undefined,
+      },
+    });
   }
 
   return (
@@ -164,7 +170,7 @@ function ProjectsPage() {
                     "Availability",
                     "Project Name",
                     "City",
-                    "Data Count",
+                    "Units",
                     "Matching Leads",
                     "Actions",
                   ].map((h) => (
@@ -181,85 +187,89 @@ function ProjectsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((p) => (
-                  <tr
-                    key={p.id}
-                    className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70"
-                  >
-                    <td className="px-4 py-3">
-                      <button
-                        role="switch"
-                        aria-checked={availability[p.id]}
-                        aria-label={`Availability for ${p.name}`}
-                        onClick={() => {
-                          setAvailability((a) => ({ ...a, [p.id]: !a[p.id] }));
-                          toast.success(
-                            `${p.name} marked ${availability[p.id] ? "unavailable" : "available"}`,
-                          );
-                        }}
-                        className={cn(
-                          "relative h-6 w-11 rounded-full transition-colors",
-                          availability[p.id] ? "bg-primary" : "bg-muted-foreground/30",
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "absolute top-0.5 size-5 rounded-full bg-card shadow transition-all",
-                            availability[p.id] ? "left-[22px]" : "left-0.5",
-                          )}
-                        />
-                      </button>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="flex items-center gap-2 font-semibold">
-                        <Building2 className="size-4 text-primary" />
-                        {p.name}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {p.units} · {p.price}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3 font-medium">{p.city}</td>
-                    <td className="px-4 py-3 tabular-nums">{p.dataCount}</td>
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => toast(`${p.matching} matching leads for ${p.name}`)}
-                        className="font-semibold text-primary underline-offset-4 hover:underline"
-                      >
-                        Match ({p.matching})
-                      </button>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-end gap-1.5">
-                        {(
-                          [
-                            [Pencil, "Edit", "bg-primary/15 text-primary"],
-                            [MessageCircle, "WhatsApp", "bg-success/15 text-success"],
-                            [Mail, "Email", "bg-warning/20 text-warning"],
-                            [Upload, "Share", "bg-info/15 text-info"],
-                            [Phone, "Call", "bg-info/15 text-info"],
-                            [Copy, "Duplicate", "bg-secondary text-muted-foreground"],
-                            [Trash2, "Delete", "bg-destructive/12 text-destructive"],
-                          ] as const
-                        ).map(([Icon, label, tone]) => (
-                          <button
-                            key={label}
-                            title={label}
-                            aria-label={`${label} ${p.name}`}
-                            onClick={() => toast.success(`${label} — ${p.name}`)}
-                            className={cn(
-                              "grid size-8 place-items-center rounded-md transition-transform hover:scale-105",
-                              tone,
-                            )}
-                          >
-                            <Icon className="size-4" />
-                          </button>
-                        ))}
-                      </div>
+                {projectsQuery.isLoading && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-16 text-center text-muted-foreground">
+                      Loading projects...
                     </td>
                   </tr>
-                ))}
-                {rows.length === 0 && (
+                )}
+                {projectsQuery.isError && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-16 text-center text-destructive">
+                      Couldn't load projects.
+                    </td>
+                  </tr>
+                )}
+                {!projectsQuery.isLoading &&
+                  !projectsQuery.isError &&
+                  rows.map((p) => (
+                    <tr
+                      key={p.id}
+                      className="border-b border-border transition-colors last:border-0 hover:bg-secondary/70"
+                    >
+                      <td className="px-4 py-3">
+                        {p.totalUnits === 0 ? (
+                          <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                            No units yet
+                          </span>
+                        ) : p.availableUnits > 0 ? (
+                          <span className="inline-flex items-center rounded-full bg-success/15 px-2.5 py-1 text-xs font-medium text-success">
+                            {p.availableUnits} available
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full bg-destructive/12 px-2.5 py-1 text-xs font-medium text-destructive">
+                            Sold out
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="flex items-center gap-2 font-semibold">
+                          <Building2 className="size-4 text-primary" />
+                          {p.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {p.unitConfigSummary ?? "—"} · {p.startingPrice ?? "Price on request"}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 font-medium">{p.city}</td>
+                      <td className="px-4 py-3 tabular-nums">{p.totalUnits}</td>
+                      <td className="px-4 py-3">
+                        <span className="font-semibold text-primary">
+                          Match ({p.matchingLeads})
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end gap-1.5">
+                          {(
+                            [
+                              [Pencil, "Edit", "bg-primary/15 text-primary"],
+                              [MessageCircle, "WhatsApp", "bg-success/15 text-success"],
+                              [Mail, "Email", "bg-warning/20 text-warning"],
+                              [Upload, "Share", "bg-info/15 text-info"],
+                              [Phone, "Call", "bg-info/15 text-info"],
+                              [Copy, "Duplicate", "bg-secondary text-muted-foreground"],
+                              [Trash2, "Delete", "bg-destructive/12 text-destructive"],
+                            ] as const
+                          ).map(([Icon, label, tone]) => (
+                            <button
+                              key={label}
+                              title={label}
+                              aria-label={`${label} ${p.name}`}
+                              onClick={() => toast.success(`${label} — ${p.name}`)}
+                              className={cn(
+                                "grid size-8 place-items-center rounded-md transition-transform hover:scale-105",
+                                tone,
+                              )}
+                            >
+                              <Icon className="size-4" />
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                {!projectsQuery.isLoading && !projectsQuery.isError && rows.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-4 py-16 text-center text-muted-foreground">
                       No projects found.
@@ -312,13 +322,13 @@ function ProjectsPage() {
                 </Label>
                 <Select
                   value={draft.type}
-                  onValueChange={(v) => setDraft((d) => ({ ...d, type: v as Project["type"] }))}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, type: v as ProjectTypeValue }))}
                 >
                   <SelectTrigger id="project-type">
                     <SelectValue placeholder="Select type" />
                   </SelectTrigger>
                   <SelectContent>
-                    {(["Residential", "Commercial", "Agricultural"] as const).map((t) => (
+                    {PROJECT_TYPE_VALUES.map((t) => (
                       <SelectItem key={t} value={t}>
                         {t}
                       </SelectItem>
@@ -333,8 +343,8 @@ function ProjectsPage() {
                 <Input
                   id="project-price"
                   placeholder="e.g. ₹ 75L onwards"
-                  value={draft.price}
-                  onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))}
+                  value={draft.startingPrice}
+                  onChange={(e) => setDraft((d) => ({ ...d, startingPrice: e.target.value }))}
                 />
               </div>
               <div className="space-y-1.5">
@@ -342,8 +352,8 @@ function ProjectsPage() {
                 <Input
                   id="project-units"
                   placeholder="e.g. 2 & 3 BHK"
-                  value={draft.units}
-                  onChange={(e) => setDraft((d) => ({ ...d, units: e.target.value }))}
+                  value={draft.unitConfigSummary}
+                  onChange={(e) => setDraft((d) => ({ ...d, unitConfigSummary: e.target.value }))}
                 />
               </div>
             </div>
@@ -351,7 +361,9 @@ function ProjectsPage() {
               <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Add Project</Button>
+              <Button type="submit" disabled={createProjectMutation.isPending}>
+                {createProjectMutation.isPending ? "Adding..." : "Add Project"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>
