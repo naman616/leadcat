@@ -14,11 +14,17 @@ import {
   Pencil,
   Phone,
   Search,
+  Upload,
   UserRoundCheck,
   X,
 } from "lucide-react";
 import { LEAD_STATUS_VALUES, LEAD_STATUS_LABELS, LEAD_STATUS_TONE } from "@/lib/lead-status";
 import { getFollowUpBucket } from "@/lib/follow-up";
+import {
+  LEAD_IMPORT_TEMPLATE_CSV,
+  parseLeadImportCsv,
+  type ParsedLeadImportRow,
+} from "@/lib/leads-import";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
 import {
   leadBudgets,
@@ -30,6 +36,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
+  bulkCreateLeads,
   createLead,
   getLead,
   listLeads,
@@ -190,17 +197,87 @@ function LeadsPage() {
     });
   }
 
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFileName, setBulkFileName] = useState<string | null>(null);
+  const [bulkFileError, setBulkFileError] = useState<string | null>(null);
+  const [bulkRows, setBulkRows] = useState<ParsedLeadImportRow[]>([]);
+
+  const bulkValidRows = bulkRows.filter((r) => r.data !== null);
+  const bulkInvalidRows = bulkRows.filter((r) => r.data === null);
+
+  const bulkImportMutation = useMutation({
+    mutationFn: bulkCreateLeads,
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast.success(`Imported ${result.created} lead${result.created === 1 ? "" : "s"}`);
+      if (result.unresolvedAssignees.length > 0) {
+        toast(`${result.unresolvedAssignees.length} assignee email(s) not found`, {
+          description: `Left unassigned: ${result.unresolvedAssignees.join(", ")}`,
+        });
+      }
+      resetBulkDialog();
+      setBulkOpen(false);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Import failed"),
+  });
+
+  function resetBulkDialog() {
+    setBulkFileName(null);
+    setBulkFileError(null);
+    setBulkRows([]);
+  }
+
+  function handleBulkFile(file: File) {
+    setBulkFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { rows, fileError } = parseLeadImportCsv(String(reader.result ?? ""));
+      setBulkRows(rows);
+      setBulkFileError(fileError);
+    };
+    reader.onerror = () => setBulkFileError("Couldn't read that file.");
+    reader.readAsText(file);
+  }
+
+  function downloadImportTemplate() {
+    const blob = new Blob([LEAD_IMPORT_TEMPLATE_CSV], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "leadcat-leads-template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function submitBulkImport() {
+    if (bulkValidRows.length === 0) return;
+    bulkImportMutation.mutate({
+      data: { rows: bulkValidRows.map((r) => r.data!) },
+    });
+  }
+
   return (
     <AppShell
       title="Manage Leads"
       actions={
-        <PrimaryAction
-          label="Add Lead"
-          onClick={() => {
-            setDraft(emptyDraft);
-            setAddOpen(true);
-          }}
-        />
+        <>
+          <button
+            onClick={() => {
+              resetBulkDialog();
+              setBulkOpen(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-input px-3.5 py-2 text-sm font-medium transition-colors hover:bg-secondary"
+          >
+            <Upload className="size-4" /> Bulk Upload
+          </button>
+          <PrimaryAction
+            label="Add Lead"
+            onClick={() => {
+              setDraft(emptyDraft);
+              setAddOpen(true);
+            }}
+          />
+        </>
       }
     >
       <div className="space-y-4">
@@ -632,6 +709,115 @@ function LeadsPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={bulkOpen}
+        onOpenChange={(open) => {
+          setBulkOpen(open);
+          if (!open) resetBulkDialog();
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Bulk Upload Leads</DialogTitle>
+            <DialogDescription>
+              Import a CSV of leads using the template below. Rows are created unassigned unless
+              "Assigned To Email" matches a teammate's org account.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <button
+              type="button"
+              onClick={downloadImportTemplate}
+              className="inline-flex items-center gap-2 rounded-lg border border-input px-3.5 py-2 text-sm font-medium transition-colors hover:bg-secondary"
+            >
+              <Download className="size-4" /> Download CSV template
+            </button>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="bulk-file">CSV file</Label>
+              <input
+                id="bulk-file"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleBulkFile(file);
+                  e.target.value = "";
+                }}
+                className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-secondary file:px-3.5 file:py-2 file:text-sm file:font-medium hover:file:bg-accent"
+              />
+              {bulkFileName && (
+                <p className="text-xs text-muted-foreground">Selected: {bulkFileName}</p>
+              )}
+            </div>
+
+            {bulkFileError && (
+              <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {bulkFileError}
+              </p>
+            )}
+
+            {bulkRows.length > 0 && (
+              <>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Chip label={`${bulkValidRows.length} ready to import`} />
+                  {bulkInvalidRows.length > 0 && (
+                    <Chip
+                      label={`${bulkInvalidRows.length} row(s) with errors — will be skipped`}
+                    />
+                  )}
+                </div>
+
+                <div className="max-h-64 overflow-y-auto rounded-lg border border-border">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-table-head text-table-head-foreground">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold">Row</th>
+                        <th className="px-3 py-2 text-left font-semibold">Name</th>
+                        <th className="px-3 py-2 text-left font-semibold">Phone</th>
+                        <th className="px-3 py-2 text-left font-semibold">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {bulkRows.map((r) => (
+                        <tr key={r.line}>
+                          <td className="px-3 py-2 text-muted-foreground">{r.line}</td>
+                          <td className="px-3 py-2">{r.raw["fullName"] || "—"}</td>
+                          <td className="px-3 py-2">{r.raw["phone"] || "—"}</td>
+                          <td className="px-3 py-2">
+                            {r.data ? (
+                              <span className="text-success">Valid</span>
+                            ) : (
+                              <span className="text-destructive">{r.errors.join("; ")}</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setBulkOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={submitBulkImport}
+              disabled={bulkValidRows.length === 0 || bulkImportMutation.isPending}
+            >
+              {bulkImportMutation.isPending
+                ? "Importing..."
+                : `Import ${bulkValidRows.length} lead${bulkValidRows.length === 1 ? "" : "s"}`}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </AppShell>

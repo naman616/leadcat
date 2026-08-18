@@ -275,6 +275,108 @@ export const reassignLead = createServerFn({ method: "POST" })
     });
   });
 
+const bulkLeadRowSchema = z.object({
+  fullName: z.string().min(1),
+  phone: z.string().min(1),
+  email: z.string().email().optional().or(z.literal("")),
+  source: z.string().optional(),
+  subSource: z.string().optional(),
+  project: z.string().optional(),
+  budget: z.string().optional(),
+  requirement: z.string().optional(),
+  city: z.string().optional(),
+  assignedToEmail: z.string().email().optional().or(z.literal("")),
+});
+
+// Matches LEAD_IMPORT_MAX_ROWS in leads-import.ts — the client-side parser
+// rejects an oversized file before it ever reaches this validator, but the
+// server enforces the same cap independently since client validation is UX,
+// not the security boundary.
+const bulkCreateLeadsSchema = z.object({ rows: z.array(bulkLeadRowSchema).min(1).max(500) });
+
+/**
+ * Bulk import: same lead-creation shape as createLead, run once per row
+ * inside a single transaction (withUserContext already wraps the whole
+ * handler in one). Rows are pre-validated client-side (see
+ * src/lib/leads-import.ts) so a per-row try/catch here would only be
+ * guarding against input that can't reach this function through the UI —
+ * the one exception is assignedToEmail, which names a *person*, not a
+ * shape, and can legitimately fail to resolve (typo, ex-teammate). That
+ * case is reported back instead of aborting the whole import.
+ */
+export const bulkCreateLeads = createServerFn({ method: "POST" })
+  .validator(bulkCreateLeadsSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+    const orgId = await requirePrimaryOrgId(userId);
+
+    return withUserContext(userId, async (tx) => {
+      const members = await tx.orgMember.findMany({
+        where: { orgId },
+        include: { user: { select: { id: true, email: true } } },
+      });
+      const memberIdByEmail = new Map(members.map((m) => [m.user.email.toLowerCase(), m.userId]));
+
+      let created = 0;
+      const unresolvedAssignees = new Set<string>();
+
+      for (const row of data.rows) {
+        const contact = await tx.contact.create({
+          data: {
+            orgId,
+            fullName: row.fullName,
+            phone: row.phone,
+            email: row.email || null,
+            city: row.city ?? null,
+          },
+        });
+
+        const lead = await tx.lead.create({
+          data: {
+            orgId,
+            contactId: contact.id,
+            assignedTo: null,
+            source: row.source ?? null,
+            subSource: row.subSource ?? null,
+            project: row.project ?? null,
+            budget: row.budget ?? null,
+            requirement: row.requirement ?? null,
+            city: row.city ?? null,
+          },
+        });
+
+        await tx.leadActivity.create({
+          data: {
+            orgId,
+            leadId: lead.id,
+            type: "system",
+            body: "Lead created via bulk import",
+            createdBy: userId,
+          },
+        });
+
+        // Same ordering as createLead/reassignLead: record the assignment
+        // before flipping leads.assigned_to, since app.can_manage_lead
+        // re-queries leads live and needs to see the pre-handoff state.
+        if (row.assignedToEmail) {
+          const targetUserId = memberIdByEmail.get(row.assignedToEmail.toLowerCase());
+          if (targetUserId) {
+            await tx.leadAssignment.create({
+              data: { orgId, leadId: lead.id, assignedTo: targetUserId, assignedBy: userId },
+            });
+            await tx.lead.update({ where: { id: lead.id }, data: { assignedTo: targetUserId } });
+          } else {
+            unresolvedAssignees.add(row.assignedToEmail);
+          }
+        }
+
+        created++;
+      }
+
+      return { created, unresolvedAssignees: Array.from(unresolvedAssignees) };
+    });
+  });
+
 const setNextActionSchema = z.object({
   leadId: z.string().uuid(),
   // A real ISO 8601 UTC string (client converts the datetime-local input's
