@@ -16,6 +16,7 @@ import {
   Search,
   Upload,
   UserRoundCheck,
+  Users,
   X,
 } from "lucide-react";
 import { LEAD_STATUS_VALUES, LEAD_STATUS_LABELS, LEAD_STATUS_TONE } from "@/lib/lead-status";
@@ -26,6 +27,7 @@ import {
   type ParsedLeadImportRow,
 } from "@/lib/leads-import";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
+import { DuplicatesDialog } from "@/components/crm/DuplicatesDialog";
 import {
   leadBudgets,
   leadRequirements,
@@ -197,6 +199,7 @@ function LeadsPage() {
     });
   }
 
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkFileName, setBulkFileName] = useState<string | null>(null);
   const [bulkFileError, setBulkFileError] = useState<string | null>(null);
@@ -261,6 +264,12 @@ function LeadsPage() {
       title="Manage Leads"
       actions={
         <>
+          <button
+            onClick={() => setDuplicatesOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-input px-3.5 py-2 text-sm font-medium transition-colors hover:bg-secondary"
+          >
+            <Users className="size-4" /> Duplicates
+          </button>
           <button
             onClick={() => {
               resetBulkDialog();
@@ -820,6 +829,8 @@ function LeadsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <DuplicatesDialog open={duplicatesOpen} onOpenChange={setDuplicatesOpen} />
     </AppShell>
   );
 }
