@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle } from "lucide-react";
 import { AppShell } from "@/components/crm/AppShell";
 import { getDashboardStats } from "@/lib/dashboard.server";
 import { LEAD_STATUS_LABELS, LEAD_STATUS_TONE, type LeadStatusValue } from "@/lib/lead-status";
@@ -76,6 +77,19 @@ function Dashboard() {
   return (
     <AppShell title="Dashboard">
       <div className="space-y-5">
+        {stats.escalatedFollowUps > 0 && (
+          <Link
+            to="/tasks"
+            className="flex items-center gap-3 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive transition-colors hover:bg-destructive/15"
+          >
+            <AlertTriangle className="size-4 shrink-0" />
+            <span className="font-medium">
+              {stats.escalatedFollowUps} follow-up{stats.escalatedFollowUps === 1 ? "" : "s"}{" "}
+              overdue by more than 24 hours — review in Tasks
+            </span>
+          </Link>
+        )}
+
         <section className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-border bg-border shadow-[var(--shadow-card)] sm:grid-cols-4 xl:grid-cols-8">
           <div className="bg-card px-4 py-4">
             <p className="text-xs font-medium text-muted-foreground">Total Leads</p>

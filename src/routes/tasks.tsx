@@ -1,10 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlarmClock, CalendarClock, CalendarDays, ListChecks } from "lucide-react";
+import { AlarmClock, AlertTriangle, CalendarClock, CalendarDays, ListChecks } from "lucide-react";
 import { AppShell } from "@/components/crm/AppShell";
 import { getTasks } from "@/lib/tasks.server";
 import { LEAD_STATUS_LABELS, LEAD_STATUS_TONE, type LeadStatusValue } from "@/lib/lead-status";
+import { getFollowUpBucket } from "@/lib/follow-up";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/tasks")({
@@ -21,35 +22,39 @@ export const Route = createFileRoute("/tasks")({
 
 type Task = Awaited<ReturnType<typeof getTasks>>[number];
 
-function bucketOf(task: Task): "overdue" | "today" | "upcoming" {
-  const due = new Date(task.nextActionAt!);
-  const now = new Date();
-  if (due.getTime() < now.getTime()) return "overdue";
-  const sameDay =
-    due.getFullYear() === now.getFullYear() &&
-    due.getMonth() === now.getMonth() &&
-    due.getDate() === now.getDate();
-  return sameDay ? "today" : "upcoming";
-}
-
 function TasksPage() {
   const tasksQuery = useQuery({ queryKey: ["tasks"], queryFn: () => getTasks() });
   const tasks = tasksQuery.data ?? [];
 
   const buckets = useMemo(() => {
-    const grouped = { overdue: [] as Task[], today: [] as Task[], upcoming: [] as Task[] };
-    for (const t of tasksQuery.data ?? []) grouped[bucketOf(t)].push(t);
+    const grouped = {
+      escalated: [] as Task[],
+      overdue: [] as Task[],
+      today: [] as Task[],
+      upcoming: [] as Task[],
+    };
+    for (const t of tasksQuery.data ?? []) {
+      const bucket = getFollowUpBucket(t.nextActionAt);
+      if (bucket === "none") continue;
+      grouped[bucket].push(t);
+    }
     return grouped;
   }, [tasksQuery.data]);
 
   return (
     <AppShell title="Tasks">
       <div className="space-y-5">
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <Stat
+            label="Escalated"
+            value={buckets.escalated.length}
+            tone="text-destructive"
+            icon={AlertTriangle}
+          />
           <Stat
             label="Overdue"
             value={buckets.overdue.length}
-            tone="text-destructive"
+            tone="text-warning"
             icon={AlarmClock}
           />
           <Stat
@@ -98,7 +103,8 @@ function TasksPage() {
 
         {!tasksQuery.isLoading && tasks.length > 0 && (
           <div className="space-y-5">
-            <TaskGroup title="Overdue" tone="text-destructive" tasks={buckets.overdue} />
+            <TaskGroup title="Escalated" tone="text-destructive" tasks={buckets.escalated} />
+            <TaskGroup title="Overdue" tone="text-warning" tasks={buckets.overdue} />
             <TaskGroup title="Due Today" tone="text-warning" tasks={buckets.today} />
             <TaskGroup title="Upcoming" tone="text-info" tasks={buckets.upcoming} />
           </div>

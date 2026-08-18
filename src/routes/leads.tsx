@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
   Clock3,
@@ -17,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { LEAD_STATUS_VALUES, LEAD_STATUS_LABELS, LEAD_STATUS_TONE } from "@/lib/lead-status";
+import { getFollowUpBucket } from "@/lib/follow-up";
 import { AppShell, PrimaryAction } from "@/components/crm/AppShell";
 import {
   leadBudgets,
@@ -369,8 +371,19 @@ function LeadsPage() {
                         </p>
                       </td>
                       <td className="px-4 py-3">
-                        <p className={cn("font-semibold", statusTone[l.status])}>
+                        <p
+                          className={cn(
+                            "flex items-center gap-1.5 font-semibold",
+                            statusTone[l.status],
+                          )}
+                        >
                           {statusLabels[l.status]}
+                          {getFollowUpBucket(l.nextActionAt) === "escalated" && (
+                            <AlertTriangle
+                              className="size-3.5 text-destructive"
+                              aria-label="Follow-up escalated"
+                            />
+                          )}
                         </p>
                         <p className="text-xs text-muted-foreground">{l.subStatus ?? ""}</p>
                       </td>
@@ -834,9 +847,22 @@ function LeadPreview({
                               {statusLabels[lead.status]}
                             </span>
                             {lead.nextActionAt && (
-                              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <Clock3 className="size-3.5" />{" "}
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 text-xs",
+                                  getFollowUpBucket(lead.nextActionAt) === "escalated"
+                                    ? "font-semibold text-destructive"
+                                    : "text-muted-foreground",
+                                )}
+                              >
+                                {getFollowUpBucket(lead.nextActionAt) === "escalated" ? (
+                                  <AlertTriangle className="size-3.5" />
+                                ) : (
+                                  <Clock3 className="size-3.5" />
+                                )}{" "}
                                 {new Date(lead.nextActionAt).toLocaleString()}
+                                {getFollowUpBucket(lead.nextActionAt) === "escalated" &&
+                                  " · Escalated"}
                               </span>
                             )}
                           </div>

@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { withUserContext } from "./db.server";
 import { requireUserId } from "./current-user.server";
+import { ESCALATION_THRESHOLD_HOURS } from "./follow-up";
 
 /**
  * Real aggregates for the dashboard, replacing the previous fully-mock
@@ -18,20 +19,24 @@ export const getDashboardStats = createServerFn({ method: "GET" }).handler(async
     // separate tx.lead.count() — one less round-trip inside a transaction
     // whose overhead (BEGIN + 2x SET LOCAL + COMMIT, over a pooled
     // connection) already dominates the cost of any one query.
-    const [statusCounts, unassignedCount, sourceCounts, recentLeads] = await Promise.all([
-      tx.lead.groupBy({ by: ["status"], _count: { _all: true } }),
-      tx.lead.count({ where: { assignedTo: null } }),
-      tx.lead.groupBy({
-        by: ["source"],
-        _count: { _all: true },
-        orderBy: { _count: { source: "desc" } },
-      }),
-      tx.lead.findMany({
-        take: 5,
-        orderBy: { createdAt: "desc" },
-        include: { contact: { select: { fullName: true } } },
-      }),
-    ]);
+    const escalationCutoff = new Date(Date.now() - ESCALATION_THRESHOLD_HOURS * 60 * 60 * 1000);
+
+    const [statusCounts, unassignedCount, escalatedCount, sourceCounts, recentLeads] =
+      await Promise.all([
+        tx.lead.groupBy({ by: ["status"], _count: { _all: true } }),
+        tx.lead.count({ where: { assignedTo: null } }),
+        tx.lead.count({ where: { nextActionAt: { lt: escalationCutoff } } }),
+        tx.lead.groupBy({
+          by: ["source"],
+          _count: { _all: true },
+          orderBy: { _count: { source: "desc" } },
+        }),
+        tx.lead.findMany({
+          take: 5,
+          orderBy: { createdAt: "desc" },
+          include: { contact: { select: { fullName: true } } },
+        }),
+      ]);
 
     const byStatus: Record<string, number> = {};
     let totalCount = 0;
@@ -43,6 +48,7 @@ export const getDashboardStats = createServerFn({ method: "GET" }).handler(async
     return {
       total: totalCount,
       unassigned: unassignedCount,
+      escalatedFollowUps: escalatedCount,
       byStatus,
       bySource: sourceCounts.map((s) => ({ source: s.source ?? "Unknown", count: s._count._all })),
       recentLeads: recentLeads.map((l) => ({
