@@ -18,16 +18,26 @@ model Organization {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name      String
   slug      String   @unique
+  /// Separate, unguessable, rotatable identifier for the public website
+  /// lead-capture form (issue #22) — deliberately NOT id/slug. Embedded in
+  /// a public form/script; holding it authorizes an anon INSERT into this
+  /// org's contacts/leads only (see the RLS policies added alongside this
+  /// column), never read/update/delete. Rotating it (re-running
+  /// gen_random_uuid()) is how a leaked token is revoked.
+  publicFormToken String @unique @default(dbgenerated("gen_random_uuid()")) @map("public_form_token") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at")
 
-  members     OrgMember[]
-  contacts    Contact[]
-  leads       Lead[]
-  activities  LeadActivity[]
-  assignments LeadAssignment[]
-  projects    Project[]
-  towers      Tower[]
-  units       Unit[]
+  members          OrgMember[]
+  contacts         Contact[]
+  leads            Lead[]
+  activities       LeadActivity[]
+  assignments      LeadAssignment[]
+  projects         Project[]
+  towers           Tower[]
+  units            Unit[]
+  tasks            Task[]
+  projectMedia     ProjectMedia[]
+  unitPriceHistory UnitPriceHistory[]
 
   @@map("organizations")
 }
@@ -47,6 +57,10 @@ model User {
   authoredActivities  LeadActivity[]
   assignmentsReceived LeadAssignment[] @relation("AssignmentAssignedTo")
   assignmentsMade     LeadAssignment[] @relation("AssignmentAssignedBy")
+  assignedTasks       Task[]           @relation("TaskAssignedTo")
+  createdTasks        Task[]           @relation("TaskCreatedBy")
+  uploadedMedia       ProjectMedia[]
+  unitPriceChanges    UnitPriceHistory[]
 
   @@map("users")
 }
@@ -163,6 +177,7 @@ model Lead {
   assignee     User?            @relation("LeadAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
   activities   LeadActivity[]
   assignments  LeadAssignment[]
+  tasks        Task[]
 
   @@map("leads")
 }
@@ -235,9 +250,10 @@ model Project {
   unitConfigSummary String?     @map("unit_config_summary")
   createdAt         DateTime    @default(now()) @map("created_at")
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
   towers       Tower[]
   units        Unit[]
+  media        ProjectMedia[]
 
   @@map("projects")
 }
@@ -277,9 +293,92 @@ model Unit {
   status        UnitStatus @default(Available)
   createdAt     DateTime   @default(now()) @map("created_at")
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tower        Tower?       @relation(fields: [towerId], references: [id], onDelete: SetNull)
+  organization Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tower        Tower?             @relation(fields: [towerId], references: [id], onDelete: SetNull)
+  priceHistory UnitPriceHistory[]
 
   @@map("units")
+}
+
+/// A to-do, scoped tightly per docs/specs/04-tasks.md: basic CRUD plus
+/// complete/reopen only — no recurrence, no notifications, no reminders.
+/// Optionally linked to a lead (a follow-up call, a document to chase) via
+/// leadId, or general (an org-wide chore) when leadId is null.
+/// completedAt null means open; a non-null timestamp means done — there's
+/// no separate "status" enum since open/done/who/when is all this slice
+/// needs.
+model Task {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  leadId      String?   @map("lead_id") @db.Uuid
+  title       String
+  dueAt       DateTime? @map("due_at")
+  assignedTo  String?   @map("assigned_to") @db.Uuid
+  completedAt DateTime? @map("completed_at")
+  createdBy   String    @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee     User?        @relation("TaskAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
+  creator      User         @relation("TaskCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([orgId, assignedTo])
+  @@index([leadId])
+  @@map("tasks")
+}
+
+enum ProjectMediaType {
+  brochure
+  floor_plan
+  price_sheet
+  rera_doc
+  other
+
+  @@map("project_media_type")
+}
+
+/// Metadata only for a project's brochures / floor plans / price sheets /
+/// RERA docs — see docs/specs/02-inventory.md, which previously deferred
+/// this whole table pending a storage decision. `storagePath` is a plain
+/// string for now (where a Supabase Storage object key/URL will eventually
+/// go); wiring a real upload flow against an actual Storage bucket is still
+/// deferred, tracked separately. `uploadedBy` nullable + SetNull, same
+/// shape as LeadActivity.createdBy — losing the uploader's user account
+/// shouldn't cascade-delete the file record itself.
+model ProjectMedia {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String           @map("org_id") @db.Uuid
+  projectId   String           @map("project_id") @db.Uuid
+  type        ProjectMediaType
+  fileName    String           @map("file_name")
+  storagePath String           @map("storage_path")
+  uploadedBy  String?          @map("uploaded_by") @db.Uuid
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploader     User?        @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
+
+  @@map("project_media")
+}
+
+/// One row per price change on a unit — append-only, same shape as
+/// LeadActivity/LeadAssignment above. No DB trigger: updateUnitPrice in
+/// src/lib/unit-price.server.ts writes Unit.price and this row together in
+/// one transaction, matching how mergeContacts does its multi-step write.
+model UnitPriceHistory {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  unitId    String   @map("unit_id") @db.Uuid
+  price     String
+  changedBy String?  @map("changed_by") @db.Uuid
+  changedAt DateTime @default(now()) @map("changed_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  unit         Unit         @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  changedByUser User?       @relation(fields: [changedBy], references: [id], onDelete: SetNull)
+
+  @@map("unit_price_history")
 }
