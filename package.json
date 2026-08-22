@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
+    "db:seed": "tsx scripts/seed.ts",
     "test:db:setup": "tsx scripts/apply-test-schema.ts",
     "test": "vitest run"
   },
