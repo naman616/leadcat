@@ -38,6 +38,9 @@ model Organization {
   tasks            Task[]
   projectMedia     ProjectMedia[]
   unitPriceHistory UnitPriceHistory[]
+  callLogs         CallLog[]
+  whatsappTemplates WhatsAppTemplate[]
+  whatsappMessages  WhatsAppMessage[]
 
   @@map("organizations")
 }
@@ -61,6 +64,7 @@ model User {
   createdTasks        Task[]           @relation("TaskCreatedBy")
   uploadedMedia       ProjectMedia[]
   unitPriceChanges    UnitPriceHistory[]
+  initiatedCalls      CallLog[]
 
   @@map("users")
 }
@@ -178,6 +182,8 @@ model Lead {
   activities   LeadActivity[]
   assignments  LeadAssignment[]
   tasks        Task[]
+  callLogs     CallLog[]
+  whatsappMessages WhatsAppMessage[]
 
   @@map("leads")
 }
@@ -381,4 +387,114 @@ model UnitPriceHistory {
   changedByUser User?       @relation(fields: [changedBy], references: [id], onDelete: SetNull)
 
   @@map("unit_price_history")
+}
+
+enum CallDirection {
+  outbound
+  inbound
+
+  @@map("call_direction")
+}
+
+enum CallStatus {
+  initiated
+  ringing
+  answered
+  completed
+  failed
+  no_answer
+
+  @@map("call_status")
+}
+
+/// Phase 4 (issue #30) — click-to-call. The real provider (Exotel/Knowlarity/
+/// Twilio, common India options) is vendor-blocked pending an account; calls
+/// go through the TelephonyProvider interface in src/lib/telephony/
+/// provider.ts, with MockTelephonyProvider actually wired up for now (see
+/// src/lib/telephony.server.ts). recordingUrl is where a real provider's
+/// recording URL will land once one exists — unpopulated by the mock.
+model CallLog {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String        @map("org_id") @db.Uuid
+  leadId          String        @map("lead_id") @db.Uuid
+  direction       CallDirection
+  fromNumber      String        @map("from_number")
+  toNumber        String        @map("to_number")
+  initiatedBy     String?       @map("initiated_by") @db.Uuid
+  status          CallStatus    @default(initiated)
+  durationSeconds Int?          @map("duration_seconds")
+  recordingUrl    String?       @map("recording_url")
+  startedAt       DateTime      @default(now()) @map("started_at")
+  endedAt         DateTime?     @map("ended_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  initiator    User?        @relation(fields: [initiatedBy], references: [id], onDelete: SetNull)
+
+  @@index([orgId, leadId])
+  @@map("call_logs")
+}
+
+enum WhatsAppDirection {
+  inbound
+  outbound
+
+  @@map("whatsapp_direction")
+}
+
+enum WhatsAppMessageStatus {
+  queued
+  sent
+  delivered
+  read
+  failed
+
+  @@map("whatsapp_message_status")
+}
+
+/// Phase 4 (issue #31) — WhatsApp shared inbox + templates. Same
+/// vendor-blocked shape as CallLog above: no real WhatsApp Business API
+/// account yet, so sends go through the WhatsAppProvider interface in
+/// src/lib/whatsapp/provider.ts, with MockWhatsAppProvider actually wired up
+/// for now (see src/lib/whatsapp.server.ts). Real WhatsApp Business
+/// templates require platform approval, so — unlike contacts/tasks — write
+/// access here is admin-gated even in this mock slice; see the RLS policies
+/// in this table's migration.
+model WhatsAppTemplate {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  name      String
+  body      String
+  category  String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  messages     WhatsAppMessage[]
+
+  @@map("whatsapp_templates")
+}
+
+/// The shared team inbox. leadId is nullable — a message can exist before
+/// it's linked to a lead (an inbound message from an unknown number), though
+/// in practice sendWhatsAppMessage will usually have one. Openness mirrors
+/// lead_activities/call_logs: any org member can view or create, no
+/// admin gate — this is routine data entry, not template management.
+model WhatsAppMessage {
+  id         String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String                @map("org_id") @db.Uuid
+  leadId     String?               @map("lead_id") @db.Uuid
+  direction  WhatsAppDirection
+  fromNumber String                @map("from_number")
+  toNumber   String                @map("to_number")
+  body       String
+  templateId String?               @map("template_id") @db.Uuid
+  status     WhatsAppMessageStatus @default(queued)
+  createdAt  DateTime              @default(now()) @map("created_at")
+
+  organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  template     WhatsAppTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, leadId])
+  @@map("whatsapp_messages")
 }
