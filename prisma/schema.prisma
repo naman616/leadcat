@@ -28,6 +28,7 @@ model Organization {
   projects    Project[]
   towers      Tower[]
   units       Unit[]
+  tasks       Task[]
 
   @@map("organizations")
 }
@@ -47,6 +48,8 @@ model User {
   authoredActivities  LeadActivity[]
   assignmentsReceived LeadAssignment[] @relation("AssignmentAssignedTo")
   assignmentsMade     LeadAssignment[] @relation("AssignmentAssignedBy")
+  assignedTasks       Task[]           @relation("TaskAssignedTo")
+  createdTasks        Task[]           @relation("TaskCreatedBy")
 
   @@map("users")
 }
@@ -163,6 +166,7 @@ model Lead {
   assignee     User?            @relation("LeadAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
   activities   LeadActivity[]
   assignments  LeadAssignment[]
+  tasks        Task[]
 
   @@map("leads")
 }
@@ -282,4 +286,32 @@ model Unit {
   tower        Tower?       @relation(fields: [towerId], references: [id], onDelete: SetNull)
 
   @@map("units")
+}
+
+/// A to-do, scoped tightly per docs/specs/04-tasks.md: basic CRUD plus
+/// complete/reopen only — no recurrence, no notifications, no reminders.
+/// Optionally linked to a lead (a follow-up call, a document to chase) via
+/// leadId, or general (an org-wide chore) when leadId is null.
+/// completedAt null means open; a non-null timestamp means done — there's
+/// no separate "status" enum since open/done/who/when is all this slice
+/// needs.
+model Task {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  leadId      String?   @map("lead_id") @db.Uuid
+  title       String
+  dueAt       DateTime? @map("due_at")
+  assignedTo  String?   @map("assigned_to") @db.Uuid
+  completedAt DateTime? @map("completed_at")
+  createdBy   String    @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee     User?        @relation("TaskAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
+  creator      User         @relation("TaskCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([orgId, assignedTo])
+  @@index([leadId])
+  @@map("tasks")
 }

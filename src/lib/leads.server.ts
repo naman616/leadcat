@@ -15,7 +15,7 @@ const contactSelect = { id: true, fullName: true, phone: true, email: true, city
  * invisible to teammates who don't share an org with them, but it's a
  * silent data-integrity gap rather than a rejected input).
  */
-async function requireOrgMember(tx: Tx, orgId: string, targetUserId: string) {
+export async function requireOrgMember(tx: Tx, orgId: string, targetUserId: string) {
   const membership = await tx.orgMember.findFirst({ where: { orgId, userId: targetUserId } });
   if (!membership) {
     throw new Error("That user isn't a member of this organization");
