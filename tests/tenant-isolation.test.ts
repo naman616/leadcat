@@ -86,6 +86,12 @@ const leadForHandoff = {
   assignedTo: agentX.id,
 };
 
+// Inventory fixtures for the unit price history tests below.
+const projectA = { id: randomUUID(), orgId: orgA.id, name: "Project A", city: "Pune", type: "Residential" as const };
+const projectB = { id: randomUUID(), orgId: orgB.id, name: "Project B", city: "Pune", type: "Residential" as const };
+const unitA = { id: randomUUID(), orgId: orgA.id, projectId: projectA.id, unitNumber: "A-101", price: "50L" };
+const unitB = { id: randomUUID(), orgId: orgB.id, projectId: projectB.id, unitNumber: "B-101", price: "60L" };
+
 beforeAll(async () => {
   // Seeded as the connection's base role (postgres superuser in the test
   // container), which bypasses RLS — the equivalent of the one audited
@@ -114,6 +120,9 @@ beforeAll(async () => {
 
   await prisma.contact.createMany({ data: [contactA, contactB] });
   await prisma.lead.createMany({ data: [leadA, leadB, leadForOrgPinTest, leadForHandoff] });
+
+  await prisma.project.createMany({ data: [projectA, projectB] });
+  await prisma.unit.createMany({ data: [unitA, unitB] });
 });
 
 afterAll(async () => {
@@ -330,5 +339,85 @@ describe("org governance and lead-handoff regressions", () => {
       });
     });
     expect(updated.assignedTo).toBe(agentY.id);
+  });
+});
+
+// Regression tests for 20260822120000_unit_price_history and
+// src/lib/unit-price.server.ts's updateUnitPrice. requireUserId() needs a
+// real request context this test file doesn't have, so — same precedent as
+// the lead-handoff test above — these replicate updateUnitPrice's exact
+// tx body (unit.update + unitPriceHistory.create, one transaction) via the
+// asUser helper rather than calling the server function directly.
+describe("unit price history", () => {
+  it("isolates unit price history by org", async () => {
+    await asUser(userA.id, (tx) =>
+      tx.unitPriceHistory.create({
+        data: { orgId: orgA.id, unitId: unitA.id, price: "50L", changedBy: userA.id },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.unitPriceHistory.create({
+        data: { orgId: orgB.id, unitId: unitB.id, price: "60L", changedBy: userB.id },
+      }),
+    );
+
+    const seenByB = await asUser(userB.id, (tx) => tx.unitPriceHistory.findMany());
+    expect(seenByB.every((h) => h.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((h) => h.unitId)).not.toContain(unitA.id);
+  });
+
+  it("any org member (not just admins) can read a unit's price history", async () => {
+    // agentX is a plain agent in orgA, not admin/owner.
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.unitPriceHistory.findMany({ where: { unitId: unitA.id } }),
+    );
+    expect(seenByAgent.length).toBeGreaterThan(0);
+    expect(seenByAgent.every((h) => h.orgId === orgA.id)).toBe(true);
+  });
+
+  it("an org admin can update a unit's price and the history row lands atomically", async () => {
+    const result = await asUser(userA.id, async (tx) => {
+      const unit = await tx.unit.update({ where: { id: unitA.id }, data: { price: "55L" } });
+      const history = await tx.unitPriceHistory.create({
+        data: { orgId: unit.orgId, unitId: unit.id, price: "55L", changedBy: userA.id },
+      });
+      return { unit, history };
+    });
+    expect(result.unit.price).toBe("55L");
+    expect(result.history.price).toBe("55L");
+
+    const historyRows = await prisma.unitPriceHistory.findMany({
+      where: { unitId: unitA.id, price: "55L" },
+    });
+    expect(historyRows).toHaveLength(1);
+  });
+
+  it("a non-admin cannot write unit price history, and the price update rolls back with it", async () => {
+    // agentX is a plain agent in orgA — units' UPDATE policy would let them
+    // through, but unit_price_history's INSERT policy is admin-only, and
+    // both writes share one transaction, so the RLS rejection on the
+    // history insert must undo the price update too.
+    await expect(
+      asUser(agentX.id, async (tx) => {
+        const unit = await tx.unit.update({ where: { id: unitA.id }, data: { price: "999L" } });
+        await tx.unitPriceHistory.create({
+          data: { orgId: unit.orgId, unitId: unit.id, price: "999L", changedBy: agentX.id },
+        });
+      }),
+    ).rejects.toThrow(/row-level security/);
+
+    const unit = await prisma.unit.findUniqueOrThrow({ where: { id: unitA.id } });
+    expect(unit.price).toBe("55L"); // unchanged from the admin test above, not "999L"
+
+    const strayHistory = await prisma.unitPriceHistory.findMany({
+      where: { unitId: unitA.id, price: "999L" },
+    });
+    expect(strayHistory).toHaveLength(0);
+  });
+
+  it("a user from another org can't touch a unit they can't even see", async () => {
+    await expect(
+      asUser(userB.id, (tx) => tx.unit.update({ where: { id: unitA.id }, data: { price: "1L" } })),
+    ).rejects.toMatchObject({ code: "P2025" });
   });
 });
