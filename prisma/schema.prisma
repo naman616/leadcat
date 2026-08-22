@@ -20,16 +20,17 @@ model Organization {
   slug      String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  members      OrgMember[]
-  contacts     Contact[]
-  leads        Lead[]
-  activities   LeadActivity[]
-  assignments  LeadAssignment[]
-  projects     Project[]
-  towers       Tower[]
-  units        Unit[]
-  tasks        Task[]
-  projectMedia ProjectMedia[]
+  members          OrgMember[]
+  contacts         Contact[]
+  leads            Lead[]
+  activities       LeadActivity[]
+  assignments      LeadAssignment[]
+  projects         Project[]
+  towers           Tower[]
+  units            Unit[]
+  tasks            Task[]
+  projectMedia     ProjectMedia[]
+  unitPriceHistory UnitPriceHistory[]
 
   @@map("organizations")
 }
@@ -52,6 +53,7 @@ model User {
   assignedTasks       Task[]           @relation("TaskAssignedTo")
   createdTasks        Task[]           @relation("TaskCreatedBy")
   uploadedMedia       ProjectMedia[]
+  unitPriceChanges    UnitPriceHistory[]
 
   @@map("users")
 }
@@ -284,9 +286,10 @@ model Unit {
   status        UnitStatus @default(Available)
   createdAt     DateTime   @default(now()) @map("created_at")
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tower        Tower?       @relation(fields: [towerId], references: [id], onDelete: SetNull)
+  organization Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tower        Tower?             @relation(fields: [towerId], references: [id], onDelete: SetNull)
+  priceHistory UnitPriceHistory[]
 
   @@map("units")
 }
@@ -352,4 +355,23 @@ model ProjectMedia {
   uploader     User?        @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
 
   @@map("project_media")
+}
+
+/// One row per price change on a unit — append-only, same shape as
+/// LeadActivity/LeadAssignment above. No DB trigger: updateUnitPrice in
+/// src/lib/unit-price.server.ts writes Unit.price and this row together in
+/// one transaction, matching how mergeContacts does its multi-step write.
+model UnitPriceHistory {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  unitId    String   @map("unit_id") @db.Uuid
+  price     String
+  changedBy String?  @map("changed_by") @db.Uuid
+  changedAt DateTime @default(now()) @map("changed_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  unit         Unit         @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  changedByUser User?       @relation(fields: [changedBy], references: [id], onDelete: SetNull)
+
+  @@map("unit_price_history")
 }
