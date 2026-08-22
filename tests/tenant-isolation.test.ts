@@ -308,6 +308,38 @@ describe("org governance and lead-handoff regressions", () => {
     expect(result.count).toBe(0);
   });
 
+  it("an org admin CAN delete a contact in their own org", async () => {
+    // Regression test for 20260818230000_contacts_dedup, the "org admins
+    // can delete contacts" policy the dedup engine's merge step relies on.
+    const contactToDelete = { id: randomUUID(), orgId: orgA.id, fullName: "Deletable A" };
+    await prisma.contact.create({ data: contactToDelete });
+
+    const result = await asUser(userA2.id, (tx) =>
+      tx.contact.deleteMany({ where: { id: contactToDelete.id } }),
+    );
+    expect(result.count).toBe(1);
+  });
+
+  it("a non-admin CANNOT delete a contact, even in their own org", async () => {
+    const contactToDelete = { id: randomUUID(), orgId: orgA.id, fullName: "Not Deletable" };
+    await prisma.contact.create({ data: contactToDelete });
+
+    const result = await asUser(agentX.id, (tx) =>
+      tx.contact.deleteMany({ where: { id: contactToDelete.id } }),
+    );
+    expect(result.count).toBe(0);
+
+    await prisma.contact.delete({ where: { id: contactToDelete.id } });
+  });
+
+  it("an admin CANNOT delete a contact belonging to another org", async () => {
+    // userA2 is admin in orgA only; contactB belongs to orgB.
+    const result = await asUser(userA2.id, (tx) =>
+      tx.contact.deleteMany({ where: { id: contactB.id } }),
+    );
+    expect(result.count).toBe(0);
+  });
+
   it("a non-admin CAN hand off their own lead to a named colleague", async () => {
     // Regression test for the bug this exact scenario used to trip:
     // recording the assignment BEFORE updating the lead (mirroring the
