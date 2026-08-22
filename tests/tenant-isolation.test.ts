@@ -364,3 +364,155 @@ describe("org governance and lead-handoff regressions", () => {
     expect(updated.assignedTo).toBe(agentY.id);
   });
 });
+
+// Regression tests for 20260822090000_tasks_core — see docs/specs/04-tasks.md
+// for the full reasoning behind app.can_manage_task. Task fixtures are
+// created inline per test (superuser connection, bypasses RLS, same as the
+// contacts-delete tests above) rather than in the shared beforeAll, since
+// each test needs its own combination of creator/assignee.
+describe("task isolation and permissions", () => {
+  it("isolates tasks the same way as leads — list and direct lookup both return nothing across orgs", async () => {
+    const taskA = { id: randomUUID(), orgId: orgA.id, title: "Org A task", createdBy: userA.id };
+    const taskB = { id: randomUUID(), orgId: orgB.id, title: "Org B task", createdBy: userB.id };
+    await prisma.task.createMany({ data: [taskA, taskB] });
+
+    const seenByB = await asUser(userB.id, (tx) => tx.task.findMany());
+    expect(seenByB.map((t) => t.id)).toEqual([taskB.id]);
+
+    const direct = await asUser(userB.id, (tx) => tx.task.findUnique({ where: { id: taskA.id } }));
+    expect(direct).toBeNull();
+  });
+
+  it("any org member can create a task in their own org, but not in another org", async () => {
+    const created = await asUser(agentX.id, (tx) =>
+      tx.task.create({ data: { orgId: orgA.id, title: "Chase RERA doc", createdBy: agentX.id } }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.task.create({ data: { orgId: orgA.id, title: "Cross-org insert", createdBy: userB.id } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("any org member can view a task in their org regardless of who created or is assigned it", async () => {
+    const task = { id: randomUUID(), orgId: orgA.id, title: "Visible to all", createdBy: userA.id };
+    await prisma.task.create({ data: task });
+
+    const seenByAgentY = await asUser(agentY.id, (tx) =>
+      tx.task.findUnique({ where: { id: task.id } }),
+    );
+    expect(seenByAgentY?.id).toBe(task.id);
+  });
+
+  it("the assignee can complete a task they didn't create", async () => {
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Follow up with buyer",
+      createdBy: userA.id,
+      assignedTo: agentY.id,
+    };
+    await prisma.task.create({ data: task });
+
+    const completed = await asUser(agentY.id, (tx) =>
+      tx.task.update({ where: { id: task.id }, data: { completedAt: new Date() } }),
+    );
+    expect(completed.completedAt).not.toBeNull();
+  });
+
+  it("the creator can complete a task assigned to someone else", async () => {
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Send brochure",
+      createdBy: agentX.id,
+      assignedTo: agentY.id,
+    };
+    await prisma.task.create({ data: task });
+
+    const completed = await asUser(agentX.id, (tx) =>
+      tx.task.update({ where: { id: task.id }, data: { completedAt: new Date() } }),
+    );
+    expect(completed.completedAt).not.toBeNull();
+  });
+
+  it("an org admin can complete any task in their org, even unrelated to them", async () => {
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Book site visit",
+      createdBy: agentX.id,
+      assignedTo: agentY.id,
+    };
+    await prisma.task.create({ data: task });
+
+    const completed = await asUser(userA2.id, (tx) =>
+      tx.task.update({ where: { id: task.id }, data: { completedAt: new Date() } }),
+    );
+    expect(completed.completedAt).not.toBeNull();
+  });
+
+  it("reopening follows the same rule — the assignee can clear completedAt", async () => {
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Call back next week",
+      createdBy: userA.id,
+      assignedTo: agentY.id,
+      completedAt: new Date(),
+    };
+    await prisma.task.create({ data: task });
+
+    const reopened = await asUser(agentY.id, (tx) =>
+      tx.task.update({ where: { id: task.id }, data: { completedAt: null } }),
+    );
+    expect(reopened.completedAt).toBeNull();
+  });
+
+  it("a same-org member with no relationship to the task cannot update it", async () => {
+    // userMulti is a plain agent in orgA — not the assignee, not the
+    // creator, not an admin.
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Unrelated to userMulti",
+      createdBy: agentX.id,
+      assignedTo: agentY.id,
+    };
+    await prisma.task.create({ data: task });
+
+    const result = await asUser(userMulti.id, (tx) =>
+      tx.task.updateMany({ where: { id: task.id }, data: { completedAt: new Date() } }),
+    );
+    expect(result.count).toBe(0);
+  });
+
+  it("a user from a different org cannot update a task in another org", async () => {
+    const task = { id: randomUUID(), orgId: orgA.id, title: "Org A only", createdBy: userA.id };
+    await prisma.task.create({ data: task });
+
+    const result = await asUser(userB.id, (tx) =>
+      tx.task.updateMany({ where: { id: task.id }, data: { completedAt: new Date() } }),
+    );
+    expect(result.count).toBe(0);
+  });
+
+  it("org_id cannot be changed on an existing task, even by a member of both orgs", async () => {
+    const task = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      title: "Pinned to org A",
+      createdBy: userA.id,
+      assignedTo: userMulti.id,
+    };
+    await prisma.task.create({ data: task });
+
+    await expect(
+      asUser(userMulti.id, (tx) =>
+        tx.task.update({ where: { id: task.id }, data: { orgId: orgB.id } }),
+      ),
+    ).rejects.toThrow(/org_id cannot be changed/);
+  });
+});
