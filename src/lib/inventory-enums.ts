@@ -25,3 +25,13 @@ export const UNIT_STATUS_TONE: Record<UnitStatusValue, string> = {
   Booked: "text-primary",
   Registered: "text-info",
 };
+
+export const PROJECT_MEDIA_TYPE_VALUES = [
+  "brochure",
+  "floor_plan",
+  "price_sheet",
+  "rera_doc",
+  "other",
+] as const;
+
+export type ProjectMediaTypeValue = (typeof PROJECT_MEDIA_TYPE_VALUES)[number];
