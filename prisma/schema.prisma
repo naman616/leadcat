@@ -18,6 +18,13 @@ model Organization {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name      String
   slug      String   @unique
+  /// Separate, unguessable, rotatable identifier for the public website
+  /// lead-capture form (issue #22) — deliberately NOT id/slug. Embedded in
+  /// a public form/script; holding it authorizes an anon INSERT into this
+  /// org's contacts/leads only (see the RLS policies added alongside this
+  /// column), never read/update/delete. Rotating it (re-running
+  /// gen_random_uuid()) is how a leaked token is revoked.
+  publicFormToken String @unique @default(dbgenerated("gen_random_uuid()")) @map("public_form_token") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at")
 
   members          OrgMember[]

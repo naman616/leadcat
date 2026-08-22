@@ -69,3 +69,34 @@ export async function withAnonContext<T>(fn: (tx: Tx) => Promise<T>): Promise<T>
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   );
 }
+
+/**
+ * Same idea, for the one anon path that's allowed to *write*: the public
+ * website lead-capture form (issue #22). Sets a "request.form_token" GUC —
+ * exactly parallel to how withUserContext sets "request.jwt.claims" for
+ * auth.uid() — which app.org_id_for_form_token() (added in
+ * prisma/migrations/20260822080000_website_lead_form_token) reads to decide
+ * which org's contacts/leads, if any, this token may INSERT into. See that
+ * migration for why organizations.id/slug can't be used for this instead.
+ *
+ * formToken must already be Zod-validated as a UUID by the caller; the
+ * regex check here is defense in depth against SQL injection, same reason
+ * withUserContext checks userId — SET LOCAL doesn't support bind params, so
+ * this value is string-interpolated into raw SQL below.
+ */
+export async function withAnonFormContext<T>(
+  formToken: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  if (!UUID_RE.test(formToken)) {
+    throw new Error(`withAnonFormContext: "${formToken}" is not a valid UUID`);
+  }
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+      await tx.$executeRawUnsafe(`SET LOCAL "request.form_token" TO '${formToken}'`);
+      return fn(tx);
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  );
+}

@@ -53,6 +53,22 @@ async function asAnon<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
   });
 }
 
+/**
+ * Same idea, for the one anon path that's allowed to write: the public
+ * website lead-capture form (issue #22). Sets a "request.form_token" GUC,
+ * which app.org_id_for_form_token() (prisma/migrations/
+ * 20260822080000_website_lead_form_token) reads to resolve which org, if
+ * any, this token authorizes an INSERT into. Mirrors withAnonFormContext in
+ * src/lib/db.server.ts exactly.
+ */
+async function asAnonWithFormToken<T>(formToken: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+    await tx.$executeRawUnsafe(`SET LOCAL "request.form_token" TO '${formToken}'`);
+    return fn(tx);
+  });
+}
+
 const run = randomUUID().slice(0, 8);
 
 const orgA = { id: randomUUID(), name: "Org A Realty", slug: `org-a-${run}` };
@@ -86,6 +102,18 @@ const leadForHandoff = {
   assignedTo: agentX.id,
 };
 
+// Inventory fixtures for the unit price history tests below.
+const projectA = { id: randomUUID(), orgId: orgA.id, name: "Project A", city: "Pune", type: "Residential" as const };
+const projectB = { id: randomUUID(), orgId: orgB.id, name: "Project B", city: "Pune", type: "Residential" as const };
+const unitA = { id: randomUUID(), orgId: orgA.id, projectId: projectA.id, unitNumber: "A-101", price: "50L" };
+const unitB = { id: randomUUID(), orgId: orgB.id, projectId: projectB.id, unitNumber: "B-101", price: "60L" };
+
+// Populated in beforeAll from the DB-generated defaults — not set on the
+// literals above, since publicFormToken is gen_random_uuid()-defaulted,
+// not something a test should hand-assign.
+let orgAFormToken: string;
+let orgBFormToken: string;
+
 beforeAll(async () => {
   // Seeded as the connection's base role (postgres superuser in the test
   // container), which bypasses RLS — the equivalent of the one audited
@@ -114,6 +142,16 @@ beforeAll(async () => {
 
   await prisma.contact.createMany({ data: [contactA, contactB] });
   await prisma.lead.createMany({ data: [leadA, leadB, leadForOrgPinTest, leadForHandoff] });
+
+  await prisma.project.createMany({ data: [projectA, projectB] });
+  await prisma.unit.createMany({ data: [unitA, unitB] });
+
+  const [fetchedOrgA, fetchedOrgB] = await Promise.all([
+    prisma.organization.findUniqueOrThrow({ where: { id: orgA.id } }),
+    prisma.organization.findUniqueOrThrow({ where: { id: orgB.id } }),
+  ]);
+  orgAFormToken = fetchedOrgA.publicFormToken;
+  orgBFormToken = fetchedOrgB.publicFormToken;
 });
 
 afterAll(async () => {
@@ -733,5 +771,133 @@ describe("unit price history", () => {
     await expect(
       asUser(userB.id, (tx) => tx.unit.update({ where: { id: unitA.id }, data: { price: "1L" } })),
     ).rejects.toMatchObject({ code: "P2025" });
+  });
+});
+
+// Issue #22 — public website lead-capture form. This is the first write
+// path an unauthenticated caller has anywhere in the app, so it gets its
+// own describe block covering exactly the guarantees CLAUDE.md requires:
+// zero rows / a clean rejection on a bad token, never another org's data,
+// and INSERT-only (no SELECT/UPDATE/DELETE), all via RLS itself rather than
+// app-level trust. See prisma/migrations/20260822080000_website_lead_form_token
+// and src/lib/website-lead.server.ts.
+describe("public website lead capture (form token)", () => {
+  it("a valid form token can create a contact + lead in its own org", async () => {
+    // createMany, not create() — Postgres RLS requires a RETURNING clause's
+    // row to also pass the table's SELECT policy, and anon deliberately has
+    // none (see the "INSERT only" test below and the migration). create()
+    // always emits RETURNING, so it would fail here even for a fully valid
+    // submission; this is exactly the shape src/lib/website-lead.server.ts
+    // uses for the same reason.
+    const websiteContactId = randomUUID();
+    const websiteLeadId = randomUUID();
+
+    await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.contact.createMany({
+        data: [{ id: websiteContactId, orgId: orgA.id, fullName: "Website Lead" }],
+      }),
+    );
+    await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.lead.createMany({
+        data: [
+          { id: websiteLeadId, orgId: orgA.id, contactId: websiteContactId, source: "Website" },
+        ],
+      }),
+    );
+
+    // Verify what actually landed using the org owner's own authenticated
+    // view — not the anon connection, which (correctly) can't read it back.
+    const contact = await asUser(userA.id, (tx) =>
+      tx.contact.findUniqueOrThrow({ where: { id: websiteContactId } }),
+    );
+    expect(contact.orgId).toBe(orgA.id);
+
+    const lead = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: websiteLeadId } }),
+    );
+    expect(lead.orgId).toBe(orgA.id);
+    expect(lead.contactId).toBe(websiteContactId);
+  });
+
+  it("an unknown token creates nothing — rejected, not silently attributed anywhere", async () => {
+    // A well-formed UUID that matches no organization's public_form_token.
+    const unknownToken = randomUUID();
+    await expect(
+      asAnonWithFormToken(unknownToken, (tx) =>
+        tx.contact.create({ data: { orgId: orgA.id, fullName: "Should never exist" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+
+    const seenByOwner = await asUser(userA.id, (tx) =>
+      tx.contact.findMany({ where: { fullName: "Should never exist" } }),
+    );
+    expect(seenByOwner).toHaveLength(0);
+  });
+
+  it("a malformed (non-UUID) token is rejected the same way as an unknown one — no leak", async () => {
+    // Exercises app.org_id_for_form_token()'s regex guard directly (Zod
+    // would normally reject this before it ever reaches Postgres — this
+    // proves the DB-side guard holds independently, not just app-level
+    // validation).
+    await expect(
+      asAnonWithFormToken("not-a-uuid-at-all", (tx) =>
+        tx.contact.create({ data: { orgId: orgA.id, fullName: "Malformed token attempt" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("org A's token can never create data attributed to org B", async () => {
+    // Holding a real, valid token only authorizes the ONE org it belongs
+    // to — this is the org-pinning guarantee for the anon path, same
+    // property the authenticated org-pinning regression test above checks.
+    await expect(
+      asAnonWithFormToken(orgAFormToken, (tx) =>
+        tx.contact.create({ data: { orgId: orgB.id, fullName: "Cross-org attempt" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+
+    const seenByOrgBOwner = await asUser(userB.id, (tx) =>
+      tx.contact.findMany({ where: { fullName: "Cross-org attempt" } }),
+    );
+    expect(seenByOrgBOwner).toHaveLength(0);
+  });
+
+  it("org B's token cannot be used to insert into org A either (not just the reverse)", async () => {
+    await expect(
+      asAnonWithFormToken(orgBFormToken, (tx) =>
+        tx.contact.create({ data: { orgId: orgA.id, fullName: "Wrong direction attempt" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a valid form token grants INSERT only — never SELECT, UPDATE, or DELETE", async () => {
+    const seen = await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.contact.findMany({ where: { orgId: orgA.id } }),
+    );
+    expect(seen).toHaveLength(0);
+
+    const updated = await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.contact.updateMany({ where: { orgId: orgA.id }, data: { fullName: "Hijacked" } }),
+    );
+    expect(updated.count).toBe(0);
+
+    const deleted = await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.contact.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleted.count).toBe(0);
+
+    // Same for leads.
+    const seenLeads = await asAnonWithFormToken(orgAFormToken, (tx) =>
+      tx.lead.findMany({ where: { orgId: orgA.id } }),
+    );
+    expect(seenLeads).toHaveLength(0);
+  });
+
+  it("plain anon (no form token set at all) still cannot create a contact or lead", async () => {
+    // asAnon() never sets request.form_token, so current_setting(..., true)
+    // returns NULL — same rejection path as an unknown token.
+    await expect(
+      asAnon((tx) => tx.contact.create({ data: { orgId: orgA.id, fullName: "No token at all" } })),
+    ).rejects.toThrow(/row-level security/);
   });
 });
