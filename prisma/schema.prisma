@@ -20,14 +20,15 @@ model Organization {
   slug      String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  members     OrgMember[]
-  contacts    Contact[]
-  leads       Lead[]
-  activities  LeadActivity[]
-  assignments LeadAssignment[]
-  projects    Project[]
-  towers      Tower[]
-  units       Unit[]
+  members      OrgMember[]
+  contacts     Contact[]
+  leads        Lead[]
+  activities   LeadActivity[]
+  assignments  LeadAssignment[]
+  projects     Project[]
+  towers       Tower[]
+  units        Unit[]
+  projectMedia ProjectMedia[]
 
   @@map("organizations")
 }
@@ -47,6 +48,7 @@ model User {
   authoredActivities  LeadActivity[]
   assignmentsReceived LeadAssignment[] @relation("AssignmentAssignedTo")
   assignmentsMade     LeadAssignment[] @relation("AssignmentAssignedBy")
+  uploadedMedia       ProjectMedia[]
 
   @@map("users")
 }
@@ -235,9 +237,10 @@ model Project {
   unitConfigSummary String?     @map("unit_config_summary")
   createdAt         DateTime    @default(now()) @map("created_at")
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
   towers       Tower[]
   units        Unit[]
+  media        ProjectMedia[]
 
   @@map("projects")
 }
@@ -282,4 +285,39 @@ model Unit {
   tower        Tower?       @relation(fields: [towerId], references: [id], onDelete: SetNull)
 
   @@map("units")
+}
+
+enum ProjectMediaType {
+  brochure
+  floor_plan
+  price_sheet
+  rera_doc
+  other
+
+  @@map("project_media_type")
+}
+
+/// Metadata only for a project's brochures / floor plans / price sheets /
+/// RERA docs — see docs/specs/02-inventory.md, which previously deferred
+/// this whole table pending a storage decision. `storagePath` is a plain
+/// string for now (where a Supabase Storage object key/URL will eventually
+/// go); wiring a real upload flow against an actual Storage bucket is still
+/// deferred, tracked separately. `uploadedBy` nullable + SetNull, same
+/// shape as LeadActivity.createdBy — losing the uploader's user account
+/// shouldn't cascade-delete the file record itself.
+model ProjectMedia {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String           @map("org_id") @db.Uuid
+  projectId   String           @map("project_id") @db.Uuid
+  type        ProjectMediaType
+  fileName    String           @map("file_name")
+  storagePath String           @map("storage_path")
+  uploadedBy  String?          @map("uploaded_by") @db.Uuid
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploader     User?        @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
+
+  @@map("project_media")
 }

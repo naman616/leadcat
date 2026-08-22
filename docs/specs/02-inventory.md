@@ -29,9 +29,11 @@ unreviewable surface. Proposed split:
 
 **Explicitly deferred to a later session:**
 
-- **`project_media`** (brochures, floor plans, RERA docs) — needs file
-  storage, and Storage/R2 isn't set up anywhere in this repo yet. That's
-  an infra decision bigger than this slice.
+- **`project_media` uploads** — the metadata table itself landed (issue #19,
+  see "`project_media`" below), but wiring a real upload flow against an
+  actual Supabase Storage bucket + bucket policies did not. `storage_path`
+  is a plain string today; nothing yet writes a real Storage object key
+  into it.
 - **`unit_price_history`** (price versioning) — a real feature in its own
   right (mirrors why `lead_assignments` is a history table, not a column),
   deserves its own spec rather than being squeezed in here.
@@ -108,6 +110,38 @@ read, and update projects/towers/units, same openness as `contacts` in
 Phase 1. No DELETE policy on any of the three tables in this slice (see
 "explicitly deferred" above) — an attempted delete fails closed, same as
 any other RLS-blocked write in this app.
+
+### `project_media` (issue #19)
+
+Metadata layer only — see the deferred note above. Records that a media
+object exists for a project; does not itself store or serve any file.
+
+| column         | type        | notes                                                        |
+| -------------- | ----------- | ------------------------------------------------------------- |
+| `id`           | uuid, pk    |                                                                 |
+| `org_id`       | uuid, fk    | → `organizations.id`                                          |
+| `project_id`   | uuid, fk    | → `projects.id`                                                |
+| `type`         | enum        | `brochure` / `floor_plan` / `price_sheet` / `rera_doc` / `other` |
+| `file_name`    | text        | original filename, display-only                               |
+| `storage_path` | text        | plain string for now — where a Supabase Storage object key/URL will eventually go; no real bucket wired up yet |
+| `uploaded_by`  | uuid, fk    | nullable, → `users.id`, `ON DELETE SET NULL` (same shape as `lead_activities.created_by`) |
+| `created_at`   | timestamptz |                                                                 |
+
+RLS: any org member can view a project's media (SELECT), same openness as
+`contacts`/`projects`/`towers`/`units`. Upload and delete are gated to org
+admins (`app.is_org_admin(org_id)`) — mirrors the exact shape of "org
+admins can delete contacts" from `20260818230000_contacts_dedup`. This is
+narrower than the rest of Phase 2's "any member can write," on purpose: a
+shared media library is more exposed to accidental/malicious churn (the
+wrong price sheet uploaded, a RERA doc deleted) than a shared contact or
+unit list. No UPDATE policy — a media row is replaced by deleting and
+re-adding, not edited in place, same append-only shape as
+`lead_activities`.
+
+Server functions (`src/lib/inventory-media.server.ts`): `listProjectMedia`,
+`addProjectMedia`, `deleteProjectMedia`. All go through `withUserContext`;
+the admin-only enforcement is the RLS policy itself, not app-level role
+checks — same division of responsibility as everywhere else in this repo.
 
 ## UI changes worth flagging explicitly
 

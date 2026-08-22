@@ -332,3 +332,141 @@ describe("org governance and lead-handoff regressions", () => {
     expect(updated.assignedTo).toBe(agentY.id);
   });
 });
+
+// Regression tests for issue #19 (project media metadata) — see
+// prisma/migrations/20260819010000_project_media and
+// docs/specs/02-inventory.md's "project_media" section. Mirrors the
+// contacts-delete-policy test shape (org admin can write, non-admin
+// cannot, even in their own org; cross-org writes never succeed).
+describe("project media isolation", () => {
+  const projectA = {
+    id: randomUUID(),
+    orgId: orgA.id,
+    name: "Media Test Project A",
+    city: "Pune",
+    type: "Residential" as const,
+  };
+  const projectB = {
+    id: randomUUID(),
+    orgId: orgB.id,
+    name: "Media Test Project B",
+    city: "Mumbai",
+    type: "Residential" as const,
+  };
+
+  beforeAll(async () => {
+    await prisma.project.createMany({ data: [projectA, projectB] });
+  });
+
+  it("org members can view a project's media, but not another org's", async () => {
+    const media = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      projectId: projectA.id,
+      type: "brochure" as const,
+      fileName: "brochure.pdf",
+      storagePath: "orgA/projectA/brochure.pdf",
+    };
+    await prisma.projectMedia.create({ data: media });
+
+    const seenByA = await asUser(userA.id, (tx) =>
+      tx.projectMedia.findMany({ where: { projectId: projectA.id } }),
+    );
+    expect(seenByA.map((m) => m.id)).toEqual([media.id]);
+
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.projectMedia.findMany({ where: { projectId: projectA.id } }),
+    );
+    expect(seenByB).toHaveLength(0);
+  });
+
+  it("an org admin CAN upload project media in their own org", async () => {
+    const created = await asUser(userA2.id, (tx) =>
+      tx.projectMedia.create({
+        data: {
+          orgId: orgA.id,
+          projectId: projectA.id,
+          type: "price_sheet",
+          fileName: "price-sheet.pdf",
+          storagePath: "orgA/projectA/price-sheet.pdf",
+          uploadedBy: userA2.id,
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT upload project media, even in their own org", async () => {
+    // agentX is a plain agent in orgA. Unlike the UPDATE/DELETE tests below
+    // (USING quietly filters to a zero-row match), an INSERT's WITH CHECK
+    // failing is a hard RLS error — there's no existing row for USING to
+    // filter, so Postgres rejects the new row outright.
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.projectMedia.create({
+          data: {
+            orgId: orgA.id,
+            projectId: projectA.id,
+            type: "other",
+            fileName: "not-allowed.pdf",
+            storagePath: "orgA/projectA/not-allowed.pdf",
+            uploadedBy: agentX.id,
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("an org admin CAN delete project media in their own org", async () => {
+    const toDelete = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      projectId: projectA.id,
+      type: "other" as const,
+      fileName: "deletable.pdf",
+      storagePath: "orgA/projectA/deletable.pdf",
+    };
+    await prisma.projectMedia.create({ data: toDelete });
+
+    const result = await asUser(userA2.id, (tx) =>
+      tx.projectMedia.deleteMany({ where: { id: toDelete.id } }),
+    );
+    expect(result.count).toBe(1);
+  });
+
+  it("a non-admin CANNOT delete project media, even in their own org", async () => {
+    const toDelete = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      projectId: projectA.id,
+      type: "other" as const,
+      fileName: "not-deletable.pdf",
+      storagePath: "orgA/projectA/not-deletable.pdf",
+    };
+    await prisma.projectMedia.create({ data: toDelete });
+
+    const result = await asUser(agentX.id, (tx) =>
+      tx.projectMedia.deleteMany({ where: { id: toDelete.id } }),
+    );
+    expect(result.count).toBe(0);
+
+    await prisma.projectMedia.delete({ where: { id: toDelete.id } });
+  });
+
+  it("an admin CANNOT delete project media belonging to another org", async () => {
+    const mediaB = {
+      id: randomUUID(),
+      orgId: orgB.id,
+      projectId: projectB.id,
+      type: "other" as const,
+      fileName: "org-b-only.pdf",
+      storagePath: "orgB/projectB/org-b-only.pdf",
+    };
+    await prisma.projectMedia.create({ data: mediaB });
+
+    const result = await asUser(userA2.id, (tx) =>
+      tx.projectMedia.deleteMany({ where: { id: mediaB.id } }),
+    );
+    expect(result.count).toBe(0);
+  });
+});
