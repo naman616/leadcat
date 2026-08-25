@@ -901,3 +901,112 @@ describe("public website lead capture (form token)", () => {
     ).rejects.toThrow(/row-level security/);
   });
 });
+
+// Regression tests for 20260822130000_assignment_rules_and_lead_score — see
+// src/lib/auto-assignment.server.ts and src/lib/lead-scoring.server.ts.
+// requireUserId() needs a real request context this test file doesn't have
+// — same precedent as the unit-price-history/task tests above — so these
+// replicate the server functions' exact tx bodies via the asUser helper
+// rather than calling the server functions directly.
+describe("assignment rules isolation and permissions", () => {
+  it("an org admin can set the org's assignment rule (upsert)", async () => {
+    const created = await asUser(userA2.id, (tx) =>
+      tx.assignmentRule.upsert({
+        where: { orgId: orgA.id },
+        create: { orgId: orgA.id, mode: "round_robin" },
+        update: { mode: "round_robin" },
+      }),
+    );
+    expect(created.mode).toBe("round_robin");
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin cannot create an assignment rule", async () => {
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.assignmentRule.create({ data: { orgId: orgB.id, mode: "round_robin" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("isolates assignment rules by org", async () => {
+    // orgB's rule is created here, independent of orgA's rule set above.
+    await prisma.assignmentRule.upsert({
+      where: { orgId: orgB.id },
+      create: { orgId: orgB.id, mode: "manual" },
+      update: {},
+    });
+
+    const seenByB = await asUser(userB.id, (tx) => tx.assignmentRule.findMany());
+    expect(seenByB.every((r) => r.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((r) => r.orgId)).not.toContain(orgA.id);
+  });
+
+  it("a non-admin CAN update the round-robin cursor (lastAssignedUserId), mirroring autoAssignLead", async () => {
+    // agentX is a plain agent in orgA, not admin/owner — this is exactly
+    // the write autoAssignLead needs to make on behalf of any org member.
+    const updated = await asUser(agentX.id, (tx) =>
+      tx.assignmentRule.update({
+        where: { orgId: orgA.id },
+        data: { lastAssignedUserId: agentX.id },
+      }),
+    );
+    expect(updated.lastAssignedUserId).toBe(agentX.id);
+  });
+
+  it("a non-admin CANNOT change the assignment mode, even though they can update the cursor", async () => {
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.assignmentRule.update({ where: { orgId: orgA.id }, data: { mode: "load_balanced" } }),
+      ),
+    ).rejects.toThrow(/only an org admin can change the assignment mode/);
+  });
+
+  it("an org admin CAN change the assignment mode", async () => {
+    const updated = await asUser(userA2.id, (tx) =>
+      tx.assignmentRule.update({ where: { orgId: orgA.id }, data: { mode: "load_balanced" } }),
+    );
+    expect(updated.mode).toBe("load_balanced");
+  });
+
+  it("org_id cannot be changed on an existing assignment rule, even by an admin", async () => {
+    await expect(
+      asUser(userA2.id, (tx) =>
+        tx.assignmentRule.update({ where: { orgId: orgA.id }, data: { orgId: orgB.id } }),
+      ),
+    ).rejects.toThrow(/org_id cannot be changed/);
+  });
+
+  it("a user from another org cannot read or write orgA's assignment rule at all", async () => {
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.assignmentRule.findUnique({ where: { orgId: orgA.id } }),
+    );
+    expect(seenByB).toBeNull();
+
+    const result = await asUser(userB.id, (tx) =>
+      tx.assignmentRule.updateMany({
+        where: { orgId: orgA.id },
+        data: { lastAssignedUserId: userB.id },
+      }),
+    );
+    expect(result.count).toBe(0);
+  });
+});
+
+describe("lead scoring", () => {
+  it("any org member can recalculate and persist a lead's score, and it's isolated by org like any other lead column", async () => {
+    // leadForHandoff was reassigned to agentY earlier in this file (see
+    // "a non-admin CAN hand off their own lead..." above) — use the org
+    // owner here, who can_manage_lead always permits regardless of who the
+    // lead's current assignee is.
+    const updated = await asUser(userA.id, (tx) =>
+      tx.lead.update({ where: { id: leadForHandoff.id }, data: { score: 55 } }),
+    );
+    expect(updated.score).toBe(55);
+
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.lead.findUnique({ where: { id: leadForHandoff.id } }),
+    );
+    expect(seenByB).toBeNull();
+  });
+});
