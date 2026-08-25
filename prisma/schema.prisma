@@ -43,6 +43,11 @@ model Organization {
   campaigns        Campaign[]
   adSets           AdSet[]
   ads              Ad[]
+  channelPartners   ChannelPartner[]
+  bookings          Booking[]
+  costSheets        CostSheet[]
+  paymentMilestones PaymentMilestone[]
+  demandLetters     DemandLetter[]
 
   @@map("organizations")
 }
@@ -67,6 +72,7 @@ model User {
   uploadedMedia       ProjectMedia[]
   unitPriceChanges    UnitPriceHistory[]
   assignmentRuleCursor AssignmentRule[]
+  bookingsMade        Booking[]          @relation("BookingBookedBy")
 
   @@map("users")
 }
@@ -189,6 +195,7 @@ model Lead {
   activities   LeadActivity[]
   assignments  LeadAssignment[]
   tasks        Task[]
+  bookings     Booking[]
 
   @@map("leads")
 }
@@ -308,6 +315,7 @@ model Unit {
   project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tower        Tower?             @relation(fields: [towerId], references: [id], onDelete: SetNull)
   priceHistory UnitPriceHistory[]
+  bookings     Booking[]
 
   @@map("units")
 }
@@ -495,4 +503,159 @@ model Ad {
   adSet        AdSet        @relation(fields: [adSetId], references: [id], onDelete: Cascade)
 
   @@map("ads")
+}
+
+// ============================================================================
+// Phase 5 — booking flow, cost sheet, payment schedule, demand letters,
+// channel partners. See docs/specs/06-booking.md. All five are org-scoped,
+// RLS enabled from the migration that creates them (CLAUDE.md). Money
+// columns use Decimal, not Unit.price's free-text String style, because
+// this slice actually does arithmetic on them (cost sheet totals, payment
+// balances) — String would just push that parsing into application code.
+// ============================================================================
+
+enum BookingStatus {
+  draft
+  confirmed
+  cancelled
+
+  @@map("booking_status")
+}
+
+enum PaymentMilestoneStatus {
+  pending
+  paid
+  overdue
+
+  @@map("payment_milestone_status")
+}
+
+enum DemandLetterStatus {
+  draft
+  sent
+
+  @@map("demand_letter_status")
+}
+
+/// A brokerage/channel-partner firm that can be attributed to a booking for
+/// commission purposes. commissionPercent is nullable — not every booking
+/// goes through a CP. No update/delete server function in this slice (only
+/// createChannelPartner/listChannelPartners are asked for); add later if
+/// there's a real need to edit or remove one.
+model ChannelPartner {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String   @map("org_id") @db.Uuid
+  name              String
+  contactPhone      String?  @map("contact_phone")
+  contactEmail      String?  @map("contact_email")
+  commissionPercent Decimal? @map("commission_percent") @db.Decimal(5, 2)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  bookings     Booking[]
+
+  @@map("channel_partners")
+}
+
+/// The sale itself — links a Lead to a Unit. createBooking (src/lib/
+/// booking.server.ts) creates this with status `confirmed` directly and, in
+/// the same transaction, flips the Unit to `Booked` and logs a system
+/// LeadActivity — same transactional shape as updateUnitPrice
+/// (src/lib/unit-price.server.ts) and mergeContacts (src/lib/dedup.server.ts).
+/// bookedBy/channelPartnerId are both nullable + SetNull: losing the agent's
+/// account or the CP record shouldn't take the booking down with it.
+model Booking {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String        @map("org_id") @db.Uuid
+  leadId           String        @map("lead_id") @db.Uuid
+  unitId           String        @map("unit_id") @db.Uuid
+  bookedBy         String?       @map("booked_by") @db.Uuid
+  channelPartnerId String?       @map("channel_partner_id") @db.Uuid
+  bookingDate      DateTime      @default(now()) @map("booking_date")
+  totalPrice       Decimal       @map("total_price") @db.Decimal(14, 2)
+  status           BookingStatus @default(draft)
+  createdAt        DateTime      @default(now()) @map("created_at")
+
+  organization      Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead              Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  unit              Unit               @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  bookedByUser      User?              @relation("BookingBookedBy", fields: [bookedBy], references: [id], onDelete: SetNull)
+  channelPartner    ChannelPartner?    @relation(fields: [channelPartnerId], references: [id], onDelete: SetNull)
+  costSheet         CostSheet?
+  paymentMilestones PaymentMilestone[]
+  demandLetters     DemandLetter[]
+
+  @@map("bookings")
+}
+
+/// One cost sheet per booking (enforced by the @unique on bookingId).
+/// otherCharges stays a flexible Json bag (e.g. { floorRise, parking, gst })
+/// rather than a hardcoded column per charge type — same "don't model every
+/// variant until asked" reasoning as Project.startingPrice. totalAmount is
+/// computed server-side in createCostSheet (basePrice + sum of otherCharges'
+/// numeric values), not a generated column, so the math stays visible and
+/// simple in application code.
+model CostSheet {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  bookingId    String   @unique @map("booking_id") @db.Uuid
+  basePrice    Decimal  @map("base_price") @db.Decimal(14, 2)
+  otherCharges Json?    @map("other_charges")
+  totalAmount  Decimal  @map("total_amount") @db.Decimal(14, 2)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("cost_sheets")
+}
+
+/// One row per installment in a booking's payment plan. generatePaymentSchedule
+/// bulk-creates these; recordPayment updates paidAmount/paidAt/status on one.
+/// status is a plain enum, not derived from paidAmount vs. dueAmount at read
+/// time, because `overdue` also depends on dueDate vs. "now" — something no
+/// current server function computes (this slice never sets it; a background
+/// sweep is a follow-up, and CLAUDE.md says not to reach for one prematurely).
+model PaymentMilestone {
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String                  @map("org_id") @db.Uuid
+  bookingId   String                  @map("booking_id") @db.Uuid
+  label       String
+  dueAmount   Decimal                 @map("due_amount") @db.Decimal(14, 2)
+  dueDate     DateTime?               @map("due_date")
+  paidAmount  Decimal                 @default(0) @map("paid_amount") @db.Decimal(14, 2)
+  paidAt      DateTime?               @map("paid_at")
+  status      PaymentMilestoneStatus  @default(pending)
+  createdAt   DateTime                @default(now()) @map("created_at")
+
+  organization  Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  booking       Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  demandLetters DemandLetter[]
+
+  @@index([orgId, bookingId])
+  @@map("payment_milestones")
+}
+
+/// Generated demand-letter text for one milestone on one booking. `content`
+/// is plain readable text/markdown built by string interpolation in
+/// generateDemandLetter (src/lib/booking.server.ts) — real PDF rendering is
+/// a deferred integration, no library added here per CLAUDE.md ("ask before
+/// adding new dependencies"). milestoneId is nullable + SetNull so a demand
+/// letter isn't destroyed if its milestone is ever removed.
+model DemandLetter {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String              @map("org_id") @db.Uuid
+  bookingId   String              @map("booking_id") @db.Uuid
+  milestoneId String?             @map("milestone_id") @db.Uuid
+  content     String
+  amount      Decimal             @db.Decimal(14, 2)
+  status      DemandLetterStatus  @default(draft)
+  generatedAt DateTime            @default(now()) @map("generated_at")
+
+  organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  booking      Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  milestone    PaymentMilestone? @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, bookingId])
+  @@map("demand_letters")
 }
