@@ -38,6 +38,8 @@ model Organization {
   tasks            Task[]
   projectMedia     ProjectMedia[]
   unitPriceHistory UnitPriceHistory[]
+  whatsappTemplates WhatsAppTemplate[]
+  whatsappMessages  WhatsAppMessage[]
 
   @@map("organizations")
 }
@@ -178,6 +180,7 @@ model Lead {
   activities   LeadActivity[]
   assignments  LeadAssignment[]
   tasks        Task[]
+  whatsappMessages WhatsAppMessage[]
 
   @@map("leads")
 }
@@ -381,4 +384,68 @@ model UnitPriceHistory {
   changedByUser User?       @relation(fields: [changedBy], references: [id], onDelete: SetNull)
 
   @@map("unit_price_history")
+}
+
+enum WhatsAppDirection {
+  inbound
+  outbound
+
+  @@map("whatsapp_direction")
+}
+
+enum WhatsAppMessageStatus {
+  queued
+  sent
+  delivered
+  read
+  failed
+
+  @@map("whatsapp_message_status")
+}
+
+/// Phase 4 (issue #31) — WhatsApp shared inbox + templates. Same
+/// vendor-blocked shape as CallLog above: no real WhatsApp Business API
+/// account yet, so sends go through the WhatsAppProvider interface in
+/// src/lib/whatsapp/provider.ts, with MockWhatsAppProvider actually wired up
+/// for now (see src/lib/whatsapp.server.ts). Real WhatsApp Business
+/// templates require platform approval, so — unlike contacts/tasks — write
+/// access here is admin-gated even in this mock slice; see the RLS policies
+/// in this table's migration.
+model WhatsAppTemplate {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  name      String
+  body      String
+  category  String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  messages     WhatsAppMessage[]
+
+  @@map("whatsapp_templates")
+}
+
+/// The shared team inbox. leadId is nullable — a message can exist before
+/// it's linked to a lead (an inbound message from an unknown number), though
+/// in practice sendWhatsAppMessage will usually have one. Openness mirrors
+/// lead_activities/call_logs: any org member can view or create, no
+/// admin gate — this is routine data entry, not template management.
+model WhatsAppMessage {
+  id         String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String                @map("org_id") @db.Uuid
+  leadId     String?               @map("lead_id") @db.Uuid
+  direction  WhatsAppDirection
+  fromNumber String                @map("from_number")
+  toNumber   String                @map("to_number")
+  body       String
+  templateId String?               @map("template_id") @db.Uuid
+  status     WhatsAppMessageStatus @default(queued)
+  createdAt  DateTime              @default(now()) @map("created_at")
+
+  organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  template     WhatsAppTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, leadId])
+  @@map("whatsapp_messages")
 }
