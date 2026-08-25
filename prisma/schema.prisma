@@ -50,6 +50,7 @@ model Organization {
   demandLetters     DemandLetter[]
   smsLogs          SmsLog[]
   emailLogs        EmailLog[]
+  callLogs         CallLog[]
 
   @@map("organizations")
 }
@@ -75,6 +76,7 @@ model User {
   unitPriceChanges    UnitPriceHistory[]
   assignmentRuleCursor AssignmentRule[]
   bookingsMade        Booking[]          @relation("BookingBookedBy")
+  initiatedCalls      CallLog[]
 
   @@map("users")
 }
@@ -201,6 +203,7 @@ model Lead {
   bookings     Booking[]
   smsLogs      SmsLog[]
   emailLogs    EmailLog[]
+  callLogs     CallLog[]
 
   @@map("leads")
 }
@@ -716,4 +719,50 @@ model EmailLog {
 
   @@index([orgId, leadId])
   @@map("email_logs")
+}
+
+enum CallDirection {
+  outbound
+  inbound
+
+  @@map("call_direction")
+}
+
+enum CallStatus {
+  initiated
+  ringing
+  answered
+  completed
+  failed
+  no_answer
+
+  @@map("call_status")
+}
+
+/// Phase 4 (issue #30) — click-to-call. The real provider (Exotel/Knowlarity/
+/// Twilio, common India options) is vendor-blocked pending an account; calls
+/// go through the TelephonyProvider interface in src/lib/telephony/
+/// provider.ts, with MockTelephonyProvider actually wired up for now (see
+/// src/lib/telephony.server.ts). recordingUrl is where a real provider's
+/// recording URL will land once one exists — unpopulated by the mock.
+model CallLog {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String        @map("org_id") @db.Uuid
+  leadId          String        @map("lead_id") @db.Uuid
+  direction       CallDirection
+  fromNumber      String        @map("from_number")
+  toNumber        String        @map("to_number")
+  initiatedBy     String?       @map("initiated_by") @db.Uuid
+  status          CallStatus    @default(initiated)
+  durationSeconds Int?          @map("duration_seconds")
+  recordingUrl    String?       @map("recording_url")
+  startedAt       DateTime      @default(now()) @map("started_at")
+  endedAt         DateTime?     @map("ended_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  initiator    User?        @relation(fields: [initiatedBy], references: [id], onDelete: SetNull)
+
+  @@index([orgId, leadId])
+  @@map("call_logs")
 }

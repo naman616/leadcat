@@ -1474,3 +1474,163 @@ describe("sms/email logging isolation", () => {
     expect(emailDelete.count).toBe(0);
   });
 });
+
+// Regression tests for 20260822130000_call_logs and
+// src/lib/telephony.server.ts's initiateClickToCall — issue #30. Mirrors the
+// unit_price_history describe block's shape: org isolation, member-can-
+// create/view (no admin gate — call_logs' RLS is open to any org member,
+// same as lead_activities), cross-org cannot, and the atomic
+// CallLog + LeadActivity write. requireUserId()/requirePrimaryOrgId() need a
+// real request context this test file doesn't have, so — same precedent as
+// the lead-handoff and unit-price tests above — the atomicity test
+// replicates initiateClickToCall's exact tx body via the asUser helper
+// rather than calling the server function directly.
+describe("call log isolation and click-to-call atomicity", () => {
+  it("isolates call logs by org", async () => {
+    await asUser(userA.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+911111111111",
+          toNumber: "+912222222222",
+          initiatedBy: userA.id,
+        },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgB.id,
+          leadId: leadB.id,
+          direction: "outbound",
+          fromNumber: "+913333333333",
+          toNumber: "+914444444444",
+          initiatedBy: userB.id,
+        },
+      }),
+    );
+
+    const seenByB = await asUser(userB.id, (tx) => tx.callLog.findMany());
+    expect(seenByB.every((c) => c.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((c) => c.leadId)).not.toContain(leadA.id);
+  });
+
+  it("any org member (not just admins) can view and create call logs", async () => {
+    // agentX is a plain agent in orgA, not admin/owner — mirrors how
+    // lead_activities has no admin gate, unlike unit_price_history.
+    const created = await asUser(agentX.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+915555555555",
+          toNumber: "+916666666666",
+          initiatedBy: agentX.id,
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.callLog.findMany({ where: { leadId: leadA.id } }),
+    );
+    expect(seenByAgent.length).toBeGreaterThan(0);
+    expect(seenByAgent.every((c) => c.orgId === orgA.id)).toBe(true);
+  });
+
+  it("a user from a different org cannot create a call log in another org's lead", async () => {
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.callLog.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "+917777777777",
+            toNumber: "+918888888888",
+            initiatedBy: userB.id,
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("initiateClickToCall creates the CallLog and the LeadActivity atomically", async () => {
+    const result = await asUser(userA.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({
+        where: { id: leadA.id },
+        include: { contact: { select: { phone: true } } },
+      });
+      const toNumber = lead.contact.phone ?? "+919999999999";
+      const providerCallId = "mock-test-call";
+
+      const callLog = await tx.callLog.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          direction: "outbound",
+          fromNumber: "+910000000000",
+          toNumber,
+          initiatedBy: userA.id,
+          status: "initiated",
+        },
+      });
+
+      const activity = await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "call",
+          body: `Call initiated to ${toNumber} (provider call ${providerCallId})`,
+          createdBy: userA.id,
+        },
+      });
+
+      return { callLog, activity };
+    });
+
+    expect(result.callLog.leadId).toBe(leadA.id);
+    expect(result.callLog.status).toBe("initiated");
+    expect(result.activity.leadId).toBe(leadA.id);
+    expect(result.activity.type).toBe("call");
+    expect(result.activity.body).toContain("mock-test-call");
+
+    const storedCallLog = await prisma.callLog.findUniqueOrThrow({ where: { id: result.callLog.id } });
+    const storedActivity = await prisma.leadActivity.findUniqueOrThrow({
+      where: { id: result.activity.id },
+    });
+    expect(storedCallLog.leadId).toBe(leadA.id);
+    expect(storedActivity.leadId).toBe(leadA.id);
+  });
+
+  it("a rejected call log write rolls back the whole transaction (no orphaned activity)", async () => {
+    // userB has no membership/visibility into leadA (org A) — the CallLog
+    // insert's WITH CHECK fails, and since both writes share one
+    // transaction, no LeadActivity should land either.
+    const activityCountBefore = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+
+    await expect(
+      asUser(userB.id, async (tx) => {
+        await tx.callLog.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "+910000000001",
+            toNumber: "+910000000002",
+            initiatedBy: userB.id,
+          },
+        });
+        await tx.leadActivity.create({
+          data: { orgId: orgA.id, leadId: leadA.id, type: "call", body: "Should never land" },
+        });
+      }),
+    ).rejects.toThrow(/row-level security/);
+
+    const activityCountAfter = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+    expect(activityCountAfter).toBe(activityCountBefore);
+  });
+});
