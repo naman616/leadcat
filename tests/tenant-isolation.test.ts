@@ -774,6 +774,109 @@ describe("unit price history", () => {
   });
 });
 
+// Regression tests for 20260822130000_ad_hierarchy (issue #25) — see
+// docs/specs/05-ad-attribution.md. Mirrors the project-media describe
+// block's shape (org members view, org admins write) since the RLS is
+// identical in kind; only ad_accounts (root) and ads (leaf) are exercised
+// here — same "pattern is identical at every level" reasoning the task
+// itself calls out, campaigns/ad_sets in between aren't re-tested.
+describe("ad hierarchy isolation", () => {
+  it("org members can view ad accounts in their org, but not another org's", async () => {
+    const account = {
+      id: randomUUID(),
+      orgId: orgA.id,
+      platform: "meta" as const,
+      externalAccountId: "act_123",
+      name: "Org A Meta Account",
+    };
+    await prisma.adAccount.create({ data: account });
+
+    const seenByA = await asUser(userA.id, (tx) => tx.adAccount.findMany());
+    expect(seenByA.map((a) => a.id)).toContain(account.id);
+
+    const seenByB = await asUser(userB.id, (tx) => tx.adAccount.findUnique({ where: { id: account.id } }));
+    expect(seenByB).toBeNull();
+  });
+
+  it("an org admin CAN create an ad account in their own org", async () => {
+    const created = await asUser(userA2.id, (tx) =>
+      tx.adAccount.create({
+        data: {
+          orgId: orgA.id,
+          platform: "google",
+          externalAccountId: "123-456-7890",
+          name: "Org A Google Account",
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT create an ad account, even in their own org", async () => {
+    // agentX is a plain agent in orgA — INSERT's WITH CHECK failing is a
+    // hard RLS error, same shape as project_media's non-admin upload test.
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.adAccount.create({
+          data: {
+            orgId: orgA.id,
+            platform: "meta",
+            externalAccountId: "act_456",
+            name: "Not allowed",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("an admin CANNOT create an ad account in another org", async () => {
+    await expect(
+      asUser(userA2.id, (tx) =>
+        tx.adAccount.create({
+          data: {
+            orgId: orgB.id,
+            platform: "meta",
+            externalAccountId: "act_789",
+            name: "Cross-org attempt",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("org members can view ads, and an org admin can create/delete a leaf ad", async () => {
+    const account = await prisma.adAccount.create({
+      data: { orgId: orgA.id, platform: "meta", externalAccountId: "act_ads", name: "Ads test account" },
+    });
+    const campaign = await prisma.campaign.create({
+      data: { orgId: orgA.id, adAccountId: account.id, externalCampaignId: "camp_1", name: "Campaign" },
+    });
+    const adSet = await prisma.adSet.create({
+      data: { orgId: orgA.id, campaignId: campaign.id, externalAdSetId: "adset_1", name: "Ad set" },
+    });
+
+    const createdAd = await asUser(userA2.id, (tx) =>
+      tx.ad.create({
+        data: { orgId: orgA.id, adSetId: adSet.id, externalAdId: "ad_1", name: "Test ad" },
+      }),
+    );
+
+    const seenByAgent = await asUser(agentX.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    expect(seenByAgent?.id).toBe(createdAd.id);
+
+    const seenByB = await asUser(userB.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    expect(seenByB).toBeNull();
+
+    const nonAdminDelete = await asUser(agentX.id, (tx) =>
+      tx.ad.deleteMany({ where: { id: createdAd.id } }),
+    );
+    expect(nonAdminDelete.count).toBe(0);
+
+    const adminDelete = await asUser(userA2.id, (tx) => tx.ad.deleteMany({ where: { id: createdAd.id } }));
+    expect(adminDelete.count).toBe(1);
+  });
+});
+
 // Issue #22 — public website lead-capture form. This is the first write
 // path an unauthenticated caller has anywhere in the app, so it gets its
 // own describe block covering exactly the guarantees CLAUDE.md requires:

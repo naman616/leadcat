@@ -39,6 +39,10 @@ model Organization {
   projectMedia     ProjectMedia[]
   unitPriceHistory UnitPriceHistory[]
   assignmentRule   AssignmentRule?
+  adAccounts       AdAccount[]
+  campaigns        Campaign[]
+  adSets           AdSet[]
+  ads              Ad[]
 
   @@map("organizations")
 }
@@ -417,4 +421,78 @@ model AssignmentRule {
   lastAssignedUser   User?        @relation(fields: [lastAssignedUserId], references: [id], onDelete: SetNull)
 
   @@map("assignment_rules")
+}
+
+enum AdPlatform {
+  meta
+  google
+
+  @@map("ad_platform")
+}
+
+/// Phase 3 (issue #25): the ad hierarchy behind `Lead`'s attribution
+/// columns (`adId`/`adSetId`/`campaignId`/`sourceId`, added nullable and
+/// unpopulated in Phase 1 — see the Lead model comment). This slice is
+/// schema + manual admin CRUD ONLY — no FK from Lead to any of these four
+/// tables (a lead's attribution can arrive via webhook before this org's ad
+/// metadata has been synced for that specific ad, so those columns must
+/// stay freely-settable UUIDs), and no real Meta/Google sync (that's Phase
+/// 3.5, issues #27-29, blocked on vendor credentials). See
+/// docs/specs/05-ad-attribution.md.
+model AdAccount {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String     @map("org_id") @db.Uuid
+  platform          AdPlatform
+  externalAccountId String     @map("external_account_id")
+  name              String
+  createdAt         DateTime   @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+
+  @@map("ad_accounts")
+}
+
+model Campaign {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  adAccountId        String   @map("ad_account_id") @db.Uuid
+  externalCampaignId String   @map("external_campaign_id")
+  name               String
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  adAccount    AdAccount    @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  adSets       AdSet[]
+
+  @@map("campaigns")
+}
+
+model AdSet {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  campaignId     String   @map("campaign_id") @db.Uuid
+  externalAdSetId String  @map("external_ad_set_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  campaign     Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads          Ad[]
+
+  @@map("ad_sets")
+}
+
+model Ad {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  adSetId     String   @map("ad_set_id") @db.Uuid
+  externalAdId String  @map("external_ad_id")
+  name        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  adSet        AdSet        @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+
+  @@map("ads")
 }
