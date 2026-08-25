@@ -25,8 +25,8 @@ export const createChannelPartner = createServerFn({ method: "POST" })
     const userId = await requireUserId();
     const orgId = await requirePrimaryOrgId(userId);
 
-    return withUserContext(userId, (tx) =>
-      tx.channelPartner.create({
+    return withUserContext(userId, async (tx) => {
+      const partner = await tx.channelPartner.create({
         data: {
           orgId,
           name: data.name,
@@ -34,14 +34,21 @@ export const createChannelPartner = createServerFn({ method: "POST" })
           contactEmail: data.contactEmail ?? null,
           commissionPercent: data.commissionPercent ?? null,
         },
-      }),
-    );
+      });
+      // commissionPercent is a Prisma Decimal (nullable) — stringify it,
+      // same convention as units.price (src/lib/unit-price.server.ts).
+      return { ...partner, commissionPercent: partner.commissionPercent?.toString() ?? null };
+    });
   });
 
 export const listChannelPartners = createServerFn({ method: "GET" }).handler(async () => {
   const userId = await requireUserId();
 
-  return withUserContext(userId, (tx) =>
-    tx.channelPartner.findMany({ orderBy: { createdAt: "desc" } }),
-  );
+  return withUserContext(userId, async (tx) => {
+    const partners = await tx.channelPartner.findMany({ orderBy: { createdAt: "desc" } });
+    return partners.map((partner) => ({
+      ...partner,
+      commissionPercent: partner.commissionPercent?.toString() ?? null,
+    }));
+  });
 });

@@ -76,7 +76,11 @@ export const createBooking = createServerFn({ method: "POST" })
         },
       });
 
-      return booking;
+      // totalPrice is a Prisma Decimal, which isn't JSON-serializable across
+      // the createServerFn boundary — stringify it, same convention as
+      // units.price (see src/lib/unit-price.server.ts) which is stored as a
+      // string throughout the app already.
+      return { ...booking, totalPrice: booking.totalPrice.toString() };
     });
   });
 
@@ -85,12 +89,16 @@ export const listBookings = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     const userId = await requireUserId();
 
-    return withUserContext(userId, (tx) =>
-      tx.booking.findMany({
+    return withUserContext(userId, async (tx) => {
+      const bookings = await tx.booking.findMany({
         where: data?.leadId ? { leadId: data.leadId } : {},
         orderBy: { createdAt: "desc" },
-      }),
-    );
+      });
+      return bookings.map((booking) => ({
+        ...booking,
+        totalPrice: booking.totalPrice.toString(),
+      }));
+    });
   });
 
 // ============================================================================
@@ -119,15 +127,24 @@ export const createCostSheet = createServerFn({ method: "POST" })
       );
       const totalAmount = data.basePrice + chargesTotal;
 
-      return tx.costSheet.create({
+      const costSheet = await tx.costSheet.create({
         data: {
           orgId: booking.orgId,
           bookingId: booking.id,
           basePrice: data.basePrice,
-          otherCharges: data.otherCharges ?? undefined,
+          // exactOptionalPropertyTypes rejects an explicit `undefined` for
+          // an optional key — only include it when actually present, same
+          // pattern as src/lib/lovable-error-reporting.ts's `stack` field.
+          ...(data.otherCharges !== undefined && { otherCharges: data.otherCharges }),
           totalAmount,
         },
       });
+
+      return {
+        ...costSheet,
+        basePrice: costSheet.basePrice.toString(),
+        totalAmount: costSheet.totalAmount.toString(),
+      };
     });
   });
 
@@ -136,12 +153,17 @@ export const listCostSheets = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     const userId = await requireUserId();
 
-    return withUserContext(userId, (tx) =>
-      tx.costSheet.findMany({
+    return withUserContext(userId, async (tx) => {
+      const costSheets = await tx.costSheet.findMany({
         where: data?.bookingId ? { bookingId: data.bookingId } : {},
         orderBy: { createdAt: "desc" },
-      }),
-    );
+      });
+      return costSheets.map((costSheet) => ({
+        ...costSheet,
+        basePrice: costSheet.basePrice.toString(),
+        totalAmount: costSheet.totalAmount.toString(),
+      }));
+    });
   });
 
 // ============================================================================
@@ -182,10 +204,15 @@ export const generatePaymentSchedule = createServerFn({ method: "POST" })
         })),
       });
 
-      return tx.paymentMilestone.findMany({
+      const milestones = await tx.paymentMilestone.findMany({
         where: { bookingId: booking.id },
         orderBy: { createdAt: "asc" },
       });
+      return milestones.map((milestone) => ({
+        ...milestone,
+        dueAmount: milestone.dueAmount.toString(),
+        paidAmount: milestone.paidAmount.toString(),
+      }));
     });
   });
 
@@ -194,12 +221,17 @@ export const listPaymentMilestones = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     const userId = await requireUserId();
 
-    return withUserContext(userId, (tx) =>
-      tx.paymentMilestone.findMany({
+    return withUserContext(userId, async (tx) => {
+      const milestones = await tx.paymentMilestone.findMany({
         where: data?.bookingId ? { bookingId: data.bookingId } : {},
         orderBy: { createdAt: "asc" },
-      }),
-    );
+      });
+      return milestones.map((milestone) => ({
+        ...milestone,
+        dueAmount: milestone.dueAmount.toString(),
+        paidAmount: milestone.paidAmount.toString(),
+      }));
+    });
   });
 
 const recordPaymentSchema = z.object({
@@ -220,7 +252,7 @@ export const recordPayment = createServerFn({ method: "POST" })
       const paidAmount = Number(milestone.paidAmount) + data.amount;
       const dueAmount = Number(milestone.dueAmount);
 
-      return tx.paymentMilestone.update({
+      const updated = await tx.paymentMilestone.update({
         where: { id: data.milestoneId },
         data: {
           paidAmount,
@@ -228,6 +260,12 @@ export const recordPayment = createServerFn({ method: "POST" })
           status: paidAmount >= dueAmount ? "paid" : "pending",
         },
       });
+
+      return {
+        ...updated,
+        dueAmount: updated.dueAmount.toString(),
+        paidAmount: updated.paidAmount.toString(),
+      };
     });
   });
 
@@ -286,7 +324,7 @@ export const generateDemandLetter = createServerFn({ method: "POST" })
         .filter((line) => line !== null)
         .join("\n");
 
-      return tx.demandLetter.create({
+      const demandLetter = await tx.demandLetter.create({
         data: {
           orgId: booking.orgId,
           bookingId: booking.id,
@@ -296,6 +334,8 @@ export const generateDemandLetter = createServerFn({ method: "POST" })
           status: "draft",
         },
       });
+
+      return { ...demandLetter, amount: demandLetter.amount.toString() };
     });
   });
 
@@ -304,10 +344,11 @@ export const listDemandLetters = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     const userId = await requireUserId();
 
-    return withUserContext(userId, (tx) =>
-      tx.demandLetter.findMany({
+    return withUserContext(userId, async (tx) => {
+      const demandLetters = await tx.demandLetter.findMany({
         where: data?.bookingId ? { bookingId: data.bookingId } : {},
         orderBy: { generatedAt: "desc" },
-      }),
-    );
+      });
+      return demandLetters.map((letter) => ({ ...letter, amount: letter.amount.toString() }));
+    });
   });
