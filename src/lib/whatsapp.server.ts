@@ -30,7 +30,7 @@ export const createTemplate = createServerFn({ method: "POST" })
 
     return withUserContext(userId, (tx) =>
       tx.whatsAppTemplate.create({
-        data: { orgId, name: data.name, body: data.body, category: data.category },
+        data: { orgId, name: data.name, body: data.body, category: data.category ?? null },
       }),
     );
   });
@@ -85,14 +85,14 @@ export const sendWhatsAppMessage = createServerFn({ method: "POST" })
       const message = await tx.whatsAppMessage.create({
         data: {
           orgId,
-          leadId: data.leadId,
+          leadId: data.leadId ?? null,
           direction: "outbound",
           // Placeholder — no per-org WhatsApp Business number is modeled yet;
           // tracked alongside the real-provider swap (issue #31).
           fromNumber: "org-whatsapp-number",
           toNumber: data.toNumber,
           body: data.body,
-          templateId: data.templateId,
+          templateId: data.templateId ?? null,
           status: "sent",
         },
       });
