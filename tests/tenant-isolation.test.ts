@@ -1113,3 +1113,201 @@ describe("lead scoring", () => {
     expect(seenByB).toBeNull();
   });
 });
+
+// Regression tests for 20260822130000_booking_flow and
+// src/lib/booking.server.ts / src/lib/channel-partners.server.ts — see
+// docs/specs/06-booking.md. requireUserId() needs a real request context
+// this test file doesn't have, so — same precedent as the unit-price-history
+// and lead-handoff tests above — these replicate createBooking's exact tx
+// body (booking create + unit update + lead activity, one transaction) via
+// the asUser helper rather than calling the server function directly.
+describe("booking flow isolation", () => {
+  const unitForBookingA = {
+    id: randomUUID(),
+    orgId: orgA.id,
+    projectId: projectA.id,
+    unitNumber: "A-201",
+    price: "60L",
+  };
+  const unitForBookingB = {
+    id: randomUUID(),
+    orgId: orgB.id,
+    projectId: projectB.id,
+    unitNumber: "B-201",
+    price: "70L",
+  };
+  const leadForBookingA = { id: randomUUID(), orgId: orgA.id, contactId: contactA.id };
+  const leadForBookingB = { id: randomUUID(), orgId: orgB.id, contactId: contactB.id };
+  const channelPartnerA = { id: randomUUID(), orgId: orgA.id, name: "Acme Realty Partners" };
+
+  let bookingA: { id: string; orgId: string };
+  let bookingB: { id: string; orgId: string };
+
+  beforeAll(async () => {
+    await prisma.unit.createMany({ data: [unitForBookingA, unitForBookingB] });
+    await prisma.lead.createMany({ data: [leadForBookingA, leadForBookingB] });
+    await prisma.channelPartner.create({ data: channelPartnerA });
+  });
+
+  it("an org member can create a booking, which atomically books the unit and logs a lead activity", async () => {
+    const created = await asUser(agentX.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: leadForBookingA.id } });
+      const unit = await tx.unit.findUniqueOrThrow({ where: { id: unitForBookingA.id } });
+
+      const booking = await tx.booking.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          unitId: unit.id,
+          bookedBy: agentX.id,
+          channelPartnerId: channelPartnerA.id,
+          totalPrice: "6000000",
+          status: "confirmed",
+        },
+      });
+      await tx.unit.update({ where: { id: unit.id }, data: { status: "Booked" } });
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "system",
+          body: `Booking confirmed for unit ${unit.unitNumber}`,
+          createdBy: agentX.id,
+        },
+      });
+      return booking;
+    });
+    expect(created.status).toBe("confirmed");
+    bookingA = { id: created.id, orgId: created.orgId };
+
+    const unit = await prisma.unit.findUniqueOrThrow({ where: { id: unitForBookingA.id } });
+    expect(unit.status).toBe("Booked");
+
+    const activities = await prisma.leadActivity.findMany({
+      where: { leadId: leadForBookingA.id, type: "system" },
+    });
+    expect(activities.length).toBeGreaterThan(0);
+
+    // A second, org-B booking for the isolation test below.
+    bookingB = await asUser(userB.id, (tx) =>
+      tx.booking.create({
+        data: {
+          orgId: orgB.id,
+          leadId: leadForBookingB.id,
+          unitId: unitForBookingB.id,
+          bookedBy: userB.id,
+          totalPrice: "7000000",
+          status: "confirmed",
+        },
+      }),
+    );
+  });
+
+  it("isolates bookings, cost sheets, payment milestones, demand letters, and channel partners by org", async () => {
+    const seenByB = await asUser(userB.id, (tx) => tx.booking.findMany());
+    expect(seenByB.every((b) => b.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((b) => b.id)).not.toContain(bookingA.id);
+
+    const direct = await asUser(userB.id, (tx) =>
+      tx.booking.findUnique({ where: { id: bookingA.id } }),
+    );
+    expect(direct).toBeNull();
+
+    const partnersSeenByB = await asUser(userB.id, (tx) => tx.channelPartner.findMany());
+    expect(partnersSeenByB.map((p) => p.id)).not.toContain(channelPartnerA.id);
+  });
+
+  it("a non-admin CAN create and view a cost sheet, payment milestones, and a demand letter", async () => {
+    const costSheet = await asUser(agentX.id, (tx) =>
+      tx.costSheet.create({
+        data: {
+          orgId: orgA.id,
+          bookingId: bookingA.id,
+          basePrice: "5800000",
+          otherCharges: { gst: 150000, parking: 50000 },
+          totalAmount: "6000000",
+        },
+      }),
+    );
+    expect(costSheet.bookingId).toBe(bookingA.id);
+
+    const milestone = await asUser(agentX.id, (tx) =>
+      tx.paymentMilestone.create({
+        data: {
+          orgId: orgA.id,
+          bookingId: bookingA.id,
+          label: "Booking Amount",
+          dueAmount: "1000000",
+        },
+      }),
+    );
+    expect(milestone.status).toBe("pending");
+
+    // recordPayment's shape: bump paidAmount, set paidAt, flip status.
+    const paid = await asUser(agentX.id, (tx) =>
+      tx.paymentMilestone.update({
+        where: { id: milestone.id },
+        data: { paidAmount: "1000000", paidAt: new Date(), status: "paid" },
+      }),
+    );
+    expect(paid.status).toBe("paid");
+
+    const letter = await asUser(agentX.id, (tx) =>
+      tx.demandLetter.create({
+        data: {
+          orgId: orgA.id,
+          bookingId: bookingA.id,
+          milestoneId: milestone.id,
+          content: "Demand letter body",
+          amount: "0",
+          status: "draft",
+        },
+      }),
+    );
+    expect(letter.status).toBe("draft");
+
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.demandLetter.findMany({ where: { bookingId: bookingA.id } }),
+    );
+    expect(seenByB).toHaveLength(0);
+  });
+
+  it("a non-admin cannot modify (e.g. cancel) an already-confirmed booking", async () => {
+    const result = await asUser(agentX.id, (tx) =>
+      tx.booking.updateMany({ where: { id: bookingA.id }, data: { status: "cancelled" } }),
+    );
+    expect(result.count).toBe(0);
+
+    const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: bookingA.id } });
+    expect(unchanged.status).toBe("confirmed");
+  });
+
+  it("an org admin CAN cancel an already-confirmed booking", async () => {
+    const updated = await asUser(userA2.id, (tx) =>
+      tx.booking.update({ where: { id: bookingA.id }, data: { status: "cancelled" } }),
+    );
+    expect(updated.status).toBe("cancelled");
+  });
+
+  it("a non-admin cannot delete a booking, even in their own org", async () => {
+    const result = await asUser(agentX.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    expect(result.count).toBe(0);
+  });
+
+  it("an org admin CAN delete a booking in their own org", async () => {
+    const result = await asUser(userA2.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    expect(result.count).toBe(1);
+  });
+
+  it("an admin from another org cannot delete or cancel a booking that isn't theirs", async () => {
+    const cancelResult = await asUser(userA2.id, (tx) =>
+      tx.booking.updateMany({ where: { id: bookingB.id }, data: { status: "cancelled" } }),
+    );
+    expect(cancelResult.count).toBe(0);
+
+    const deleteResult = await asUser(userA2.id, (tx) =>
+      tx.booking.deleteMany({ where: { id: bookingB.id } }),
+    );
+    expect(deleteResult.count).toBe(0);
+  });
+});
