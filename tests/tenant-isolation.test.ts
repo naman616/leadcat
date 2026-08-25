@@ -1474,3 +1474,417 @@ describe("sms/email logging isolation", () => {
     expect(emailDelete.count).toBe(0);
   });
 });
+
+// Regression tests for 20260822130000_call_logs and
+// src/lib/telephony.server.ts's initiateClickToCall — issue #30. Mirrors the
+// unit_price_history describe block's shape: org isolation, member-can-
+// create/view (no admin gate — call_logs' RLS is open to any org member,
+// same as lead_activities), cross-org cannot, and the atomic
+// CallLog + LeadActivity write. requireUserId()/requirePrimaryOrgId() need a
+// real request context this test file doesn't have, so — same precedent as
+// the lead-handoff and unit-price tests above — the atomicity test
+// replicates initiateClickToCall's exact tx body via the asUser helper
+// rather than calling the server function directly.
+describe("call log isolation and click-to-call atomicity", () => {
+  it("isolates call logs by org", async () => {
+    await asUser(userA.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+911111111111",
+          toNumber: "+912222222222",
+          initiatedBy: userA.id,
+        },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgB.id,
+          leadId: leadB.id,
+          direction: "outbound",
+          fromNumber: "+913333333333",
+          toNumber: "+914444444444",
+          initiatedBy: userB.id,
+        },
+      }),
+    );
+
+    const seenByB = await asUser(userB.id, (tx) => tx.callLog.findMany());
+    expect(seenByB.every((c) => c.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((c) => c.leadId)).not.toContain(leadA.id);
+  });
+
+  it("any org member (not just admins) can view and create call logs", async () => {
+    // agentX is a plain agent in orgA, not admin/owner — mirrors how
+    // lead_activities has no admin gate, unlike unit_price_history.
+    const created = await asUser(agentX.id, (tx) =>
+      tx.callLog.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+915555555555",
+          toNumber: "+916666666666",
+          initiatedBy: agentX.id,
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.callLog.findMany({ where: { leadId: leadA.id } }),
+    );
+    expect(seenByAgent.length).toBeGreaterThan(0);
+    expect(seenByAgent.every((c) => c.orgId === orgA.id)).toBe(true);
+  });
+
+  it("a user from a different org cannot create a call log in another org's lead", async () => {
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.callLog.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "+917777777777",
+            toNumber: "+918888888888",
+            initiatedBy: userB.id,
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("initiateClickToCall creates the CallLog and the LeadActivity atomically", async () => {
+    const result = await asUser(userA.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({
+        where: { id: leadA.id },
+        include: { contact: { select: { phone: true } } },
+      });
+      const toNumber = lead.contact.phone ?? "+919999999999";
+      const providerCallId = "mock-test-call";
+
+      const callLog = await tx.callLog.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          direction: "outbound",
+          fromNumber: "+910000000000",
+          toNumber,
+          initiatedBy: userA.id,
+          status: "initiated",
+        },
+      });
+
+      const activity = await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "call",
+          body: `Call initiated to ${toNumber} (provider call ${providerCallId})`,
+          createdBy: userA.id,
+        },
+      });
+
+      return { callLog, activity };
+    });
+
+    expect(result.callLog.leadId).toBe(leadA.id);
+    expect(result.callLog.status).toBe("initiated");
+    expect(result.activity.leadId).toBe(leadA.id);
+    expect(result.activity.type).toBe("call");
+    expect(result.activity.body).toContain("mock-test-call");
+
+    const storedCallLog = await prisma.callLog.findUniqueOrThrow({ where: { id: result.callLog.id } });
+    const storedActivity = await prisma.leadActivity.findUniqueOrThrow({
+      where: { id: result.activity.id },
+    });
+    expect(storedCallLog.leadId).toBe(leadA.id);
+    expect(storedActivity.leadId).toBe(leadA.id);
+  });
+
+  it("a rejected call log write rolls back the whole transaction (no orphaned activity)", async () => {
+    // userB has no membership/visibility into leadA (org A) — the CallLog
+    // insert's WITH CHECK fails, and since both writes share one
+    // transaction, no LeadActivity should land either.
+    const activityCountBefore = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+
+    await expect(
+      asUser(userB.id, async (tx) => {
+        await tx.callLog.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "+910000000001",
+            toNumber: "+910000000002",
+            initiatedBy: userB.id,
+          },
+        });
+        await tx.leadActivity.create({
+          data: { orgId: orgA.id, leadId: leadA.id, type: "call", body: "Should never land" },
+        });
+      }),
+    ).rejects.toThrow(/row-level security/);
+
+    const activityCountAfter = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+    expect(activityCountAfter).toBe(activityCountBefore);
+  });
+});
+
+// Regression tests for 20260822140000_whatsapp_core and
+// src/lib/whatsapp.server.ts's sendWhatsAppMessage — issue #31. Templates
+// are admin-gated (mirrors unit_price_history's admin-only INSERT/UPDATE/
+// DELETE, and "org admins can delete contacts" from 20260818230000_
+// contacts_dedup) because real WhatsApp Business templates need platform
+// approval; messages are open to any org member (mirrors lead_activities/
+// call_logs — a shared team inbox). requireUserId()/requirePrimaryOrgId()
+// need a real request context this test file doesn't have, so — same
+// precedent as the call-log/unit-price tests above — the atomicity test
+// replicates sendWhatsAppMessage's exact tx body via the asUser helper
+// rather than calling the server function directly.
+describe("whatsapp template and message isolation", () => {
+  it("isolates whatsapp templates by org", async () => {
+    await asUser(userA.id, (tx) =>
+      tx.whatsAppTemplate.create({
+        data: { orgId: orgA.id, name: "Welcome A", body: "Hi from org A" },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.whatsAppTemplate.create({
+        data: { orgId: orgB.id, name: "Welcome B", body: "Hi from org B" },
+      }),
+    );
+
+    const seenByB = await asUser(userB.id, (tx) => tx.whatsAppTemplate.findMany());
+    expect(seenByB.every((t) => t.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((t) => t.name)).not.toContain("Welcome A");
+  });
+
+  it("an org admin CAN create a whatsapp template", async () => {
+    // userA2 is 'admin' in orgA — not owner, confirming plain admin (not
+    // just owner) is enough, same as app.is_org_admin's intent elsewhere.
+    const created = await asUser(userA2.id, (tx) =>
+      tx.whatsAppTemplate.create({
+        data: { orgId: orgA.id, name: "Follow-up", body: "Just checking in", category: "utility" },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT create a whatsapp template, even in their own org", async () => {
+    // agentX is a plain agent in orgA.
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.whatsAppTemplate.create({
+          data: { orgId: orgA.id, name: "Not allowed", body: "Should be rejected" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a non-admin CANNOT update or delete a whatsapp template, even in their own org", async () => {
+    const template = await prisma.whatsAppTemplate.create({
+      data: { orgId: orgA.id, name: "Editable only by admin", body: "Original body" },
+    });
+
+    const updateResult = await asUser(agentX.id, (tx) =>
+      tx.whatsAppTemplate.updateMany({
+        where: { id: template.id },
+        data: { body: "Hijacked body" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const deleteResult = await asUser(agentX.id, (tx) =>
+      tx.whatsAppTemplate.deleteMany({ where: { id: template.id } }),
+    );
+    expect(deleteResult.count).toBe(0);
+
+    const stillThere = await prisma.whatsAppTemplate.findUniqueOrThrow({ where: { id: template.id } });
+    expect(stillThere.body).toBe("Original body");
+  });
+
+  it("an org admin CAN update and delete a whatsapp template in their own org", async () => {
+    const template = await prisma.whatsAppTemplate.create({
+      data: { orgId: orgA.id, name: "Admin managed", body: "Original" },
+    });
+
+    const updated = await asUser(userA2.id, (tx) =>
+      tx.whatsAppTemplate.update({ where: { id: template.id }, data: { body: "Updated by admin" } }),
+    );
+    expect(updated.body).toBe("Updated by admin");
+
+    const deleted = await asUser(userA2.id, (tx) =>
+      tx.whatsAppTemplate.deleteMany({ where: { id: template.id } }),
+    );
+    expect(deleted.count).toBe(1);
+  });
+
+  it("an admin CANNOT write a whatsapp template belonging to another org", async () => {
+    // userA2 is admin in orgA only.
+    await expect(
+      asUser(userA2.id, (tx) =>
+        tx.whatsAppTemplate.create({
+          data: { orgId: orgB.id, name: "Cross-org attempt", body: "Should be rejected" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("isolates whatsapp messages by org", async () => {
+    await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+910000000010",
+          toNumber: "+910000000011",
+          body: "Hello from org A",
+          status: "sent",
+        },
+      }),
+    );
+    await asUser(userB.id, (tx) =>
+      tx.whatsAppMessage.create({
+        data: {
+          orgId: orgB.id,
+          leadId: leadB.id,
+          direction: "outbound",
+          fromNumber: "+910000000012",
+          toNumber: "+910000000013",
+          body: "Hello from org B",
+          status: "sent",
+        },
+      }),
+    );
+
+    const seenByB = await asUser(userB.id, (tx) => tx.whatsAppMessage.findMany());
+    expect(seenByB.every((m) => m.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((m) => m.leadId)).not.toContain(leadA.id);
+  });
+
+  it("any org member (not just admins) can view and send whatsapp messages", async () => {
+    // agentX is a plain agent in orgA, not admin/owner — messages are open,
+    // unlike templates.
+    const created = await asUser(agentX.id, (tx) =>
+      tx.whatsAppMessage.create({
+        data: {
+          orgId: orgA.id,
+          leadId: leadA.id,
+          direction: "outbound",
+          fromNumber: "+910000000014",
+          toNumber: "+910000000015",
+          body: "Sent by a plain agent",
+          status: "sent",
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.whatsAppMessage.findMany({ where: { leadId: leadA.id } }),
+    );
+    expect(seenByAgent.length).toBeGreaterThan(0);
+    expect(seenByAgent.every((m) => m.orgId === orgA.id)).toBe(true);
+  });
+
+  it("a user from a different org cannot create a whatsapp message in another org's lead", async () => {
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.whatsAppMessage.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "+910000000016",
+            toNumber: "+910000000017",
+            body: "Should be rejected",
+            status: "sent",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("sendWhatsAppMessage creates the WhatsAppMessage and LeadActivity atomically when leadId is set", async () => {
+    const result = await asUser(userA.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: leadA.id } });
+      const providerMessageId = "mock-test-whatsapp";
+      const toNumber = "+919999999999";
+      const body = "Hi, following up on your enquiry";
+
+      const message = await tx.whatsAppMessage.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          direction: "outbound",
+          fromNumber: "org-whatsapp-number",
+          toNumber,
+          body,
+          status: "sent",
+        },
+      });
+
+      const activity = await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "whatsapp",
+          body: `WhatsApp sent to ${toNumber} (provider id ${providerMessageId}): ${body}`,
+          createdBy: userA.id,
+        },
+      });
+
+      return { message, activity };
+    });
+
+    expect(result.message.leadId).toBe(leadA.id);
+    expect(result.message.status).toBe("sent");
+    expect(result.activity.leadId).toBe(leadA.id);
+    expect(result.activity.type).toBe("whatsapp");
+    expect(result.activity.body).toContain("mock-test-whatsapp");
+
+    const storedMessage = await prisma.whatsAppMessage.findUniqueOrThrow({
+      where: { id: result.message.id },
+    });
+    const storedActivity = await prisma.leadActivity.findUniqueOrThrow({
+      where: { id: result.activity.id },
+    });
+    expect(storedMessage.leadId).toBe(leadA.id);
+    expect(storedActivity.leadId).toBe(leadA.id);
+  });
+
+  it("a rejected whatsapp message write rolls back the whole transaction (no orphaned activity)", async () => {
+    // userB has no membership/visibility into leadA (org A) — the
+    // WhatsAppMessage insert's WITH CHECK fails, and since both writes
+    // share one transaction, no LeadActivity should land either.
+    const activityCountBefore = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+
+    await expect(
+      asUser(userB.id, async (tx) => {
+        await tx.whatsAppMessage.create({
+          data: {
+            orgId: orgA.id,
+            leadId: leadA.id,
+            direction: "outbound",
+            fromNumber: "org-whatsapp-number",
+            toNumber: "+910000000018",
+            body: "Should never land",
+            status: "sent",
+          },
+        });
+        await tx.leadActivity.create({
+          data: { orgId: orgA.id, leadId: leadA.id, type: "whatsapp", body: "Should never land" },
+        });
+      }),
+    ).rejects.toThrow(/row-level security/);
+
+    const activityCountAfter = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
+    expect(activityCountAfter).toBe(activityCountBefore);
+  });
+});
