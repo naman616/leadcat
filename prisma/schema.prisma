@@ -48,6 +48,8 @@ model Organization {
   costSheets        CostSheet[]
   paymentMilestones PaymentMilestone[]
   demandLetters     DemandLetter[]
+  smsLogs          SmsLog[]
+  emailLogs        EmailLog[]
 
   @@map("organizations")
 }
@@ -121,6 +123,7 @@ enum ActivityType {
   call
   whatsapp
   email
+  sms
   system
 
   @@map("activity_type")
@@ -196,6 +199,8 @@ model Lead {
   assignments  LeadAssignment[]
   tasks        Task[]
   bookings     Booking[]
+  smsLogs      SmsLog[]
+  emailLogs    EmailLog[]
 
   @@map("leads")
 }
@@ -658,4 +663,57 @@ model DemandLetter {
 
   @@index([orgId, bookingId])
   @@map("demand_letters")
+}
+
+enum NotificationStatus {
+  queued
+  sent
+  delivered
+  failed
+
+  @@map("notification_status")
+}
+
+/// Phase 4 (issues #32/#33) — SMS send log. No real DLT-registered SMS
+/// provider yet (needs India TRAI DLT registration first); sends go through
+/// the SmsProvider interface in src/lib/sms/provider.ts, with
+/// MockSmsProvider actually wired up for now (see src/lib/sms.server.ts).
+/// leadId is nullable (a send doesn't have to be tied to a lead) but
+/// cascades — same shape as Task.leadId, not CallLog.leadId (which is
+/// required, since every call there is lead-initiated).
+model SmsLog {
+  id        String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String             @map("org_id") @db.Uuid
+  leadId    String?            @map("lead_id") @db.Uuid
+  toNumber  String             @map("to_number")
+  body      String
+  status    NotificationStatus @default(queued)
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, leadId])
+  @@map("sms_logs")
+}
+
+/// Phase 4 (issues #32/#33) — transactional/campaign email send log. Same
+/// vendor-blocked shape as SmsLog: no real transactional email provider
+/// yet, sends go through EmailProvider (src/lib/email/provider.ts) with
+/// MockEmailProvider wired up for now (see src/lib/email.server.ts).
+model EmailLog {
+  id        String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String             @map("org_id") @db.Uuid
+  leadId    String?            @map("lead_id") @db.Uuid
+  toAddress String             @map("to_address")
+  subject   String
+  body      String
+  status    NotificationStatus @default(queued)
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, leadId])
+  @@map("email_logs")
 }
