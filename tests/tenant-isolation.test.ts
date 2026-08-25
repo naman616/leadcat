@@ -901,3 +901,166 @@ describe("public website lead capture (form token)", () => {
     ).rejects.toThrow(/row-level security/);
   });
 });
+
+// Regression tests for 20260822140000_sms_email_logs (issues #32/#33) — see
+// src/lib/sms.server.ts and src/lib/email.server.ts. requireUserId() needs a
+// real request context this test file doesn't have — same precedent as the
+// unit-price-history/task tests above — so these replicate the server
+// functions' exact tx bodies via the asUser helper rather than calling the
+// server functions directly.
+describe("sms/email logging isolation", () => {
+  const leadForSmsA = { id: randomUUID(), orgId: orgA.id, contactId: contactA.id };
+
+  beforeAll(async () => {
+    await prisma.lead.create({ data: leadForSmsA });
+  });
+
+  it("any org member can send an SMS, which atomically logs the send and a matching lead activity", async () => {
+    const smsLog = await asUser(agentX.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: leadForSmsA.id } });
+      const log = await tx.smsLog.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          toNumber: "+919999999999",
+          body: "Site visit confirmed for Saturday",
+          status: "sent",
+        },
+      });
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "sms",
+          body: "SMS sent to +919999999999: Site visit confirmed for Saturday",
+          createdBy: agentX.id,
+        },
+      });
+      return log;
+    });
+    expect(smsLog.status).toBe("sent");
+
+    // Proves the migration's ActivityType.sms enum value actually round-trips.
+    const activities = await prisma.leadActivity.findMany({
+      where: { leadId: leadForSmsA.id, type: "sms" },
+    });
+    expect(activities).toHaveLength(1);
+  });
+
+  it("any org member can send an email the same way", async () => {
+    const emailLog = await asUser(agentX.id, async (tx) => {
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: leadForSmsA.id } });
+      const log = await tx.emailLog.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          toAddress: "buyer@example.com",
+          subject: "Your booking confirmation",
+          body: "Thanks for booking with us.",
+          status: "sent",
+        },
+      });
+      await tx.leadActivity.create({
+        data: {
+          orgId: lead.orgId,
+          leadId: lead.id,
+          type: "email",
+          body: "Email sent to buyer@example.com: Your booking confirmation",
+          createdBy: agentX.id,
+        },
+      });
+      return log;
+    });
+    expect(emailLog.status).toBe("sent");
+  });
+
+  it("a send doesn't have to be tied to a lead — orgId alone is enough, and status defaults to queued", async () => {
+    const smsLog = await asUser(userB.id, (tx) =>
+      tx.smsLog.create({
+        data: { orgId: orgB.id, toNumber: "+911234567890", body: "Standalone send" },
+      }),
+    );
+    expect(smsLog.leadId).toBeNull();
+    expect(smsLog.status).toBe("queued");
+
+    const emailLog = await asUser(userB.id, (tx) =>
+      tx.emailLog.create({
+        data: {
+          orgId: orgB.id,
+          toAddress: "lead@example.com",
+          subject: "Hi",
+          body: "Hi there",
+        },
+      }),
+    );
+    expect(emailLog.leadId).toBeNull();
+    expect(emailLog.status).toBe("queued");
+  });
+
+  it("isolates sms_logs and email_logs by org — list and direct lookup both return nothing across orgs", async () => {
+    const smsSeenByB = await asUser(userB.id, (tx) => tx.smsLog.findMany());
+    expect(smsSeenByB.every((s) => s.orgId === orgB.id)).toBe(true);
+
+    const emailSeenByB = await asUser(userB.id, (tx) => tx.emailLog.findMany());
+    expect(emailSeenByB.every((e) => e.orgId === orgB.id)).toBe(true);
+
+    const orgASms = await prisma.smsLog.findFirstOrThrow({ where: { orgId: orgA.id } });
+    const direct = await asUser(userB.id, (tx) => tx.smsLog.findUnique({ where: { id: orgASms.id } }));
+    expect(direct).toBeNull();
+  });
+
+  it("any org member can view logs sent by a colleague in the same org, not just their own sends", async () => {
+    // agentY never sent anything — the SELECT policy is is_org_member(org_id),
+    // not "only the sender," same openness as lead_activities.
+    const seenByAgentY = await asUser(agentY.id, (tx) =>
+      tx.smsLog.findMany({ where: { orgId: orgA.id } }),
+    );
+    expect(seenByAgentY.length).toBeGreaterThan(0);
+  });
+
+  it("a user from another org cannot create an sms/email log attributed to a foreign org", async () => {
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.smsLog.create({
+          data: { orgId: orgA.id, toNumber: "+910000000000", body: "Cross-org attempt" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+
+    await expect(
+      asUser(userB.id, (tx) =>
+        tx.emailLog.create({
+          data: { orgId: orgA.id, toAddress: "x@example.com", subject: "x", body: "Cross-org attempt" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("has no UPDATE or DELETE policy at all — logs are append-only, even for an org admin", async () => {
+    // Mirrors lead_activities/lead_assignments: a send log that could be
+    // edited after the fact isn't an audit trail. Unlike contacts/
+    // project_media/bookings, there's no admin-only escape hatch here — the
+    // migration deliberately defines only SELECT and INSERT policies, so
+    // UPDATE/DELETE match zero rows for every role, admin included.
+    const smsLog = await prisma.smsLog.findFirstOrThrow({ where: { orgId: orgA.id } });
+    const emailLog = await prisma.emailLog.findFirstOrThrow({ where: { orgId: orgA.id } });
+
+    const smsUpdate = await asUser(userA2.id, (tx) =>
+      tx.smsLog.updateMany({ where: { id: smsLog.id }, data: { status: "delivered" } }),
+    );
+    expect(smsUpdate.count).toBe(0);
+
+    const smsDelete = await asUser(userA2.id, (tx) => tx.smsLog.deleteMany({ where: { id: smsLog.id } }));
+    expect(smsDelete.count).toBe(0);
+
+    const emailUpdate = await asUser(userA2.id, (tx) =>
+      tx.emailLog.updateMany({ where: { id: emailLog.id }, data: { status: "delivered" } }),
+    );
+    expect(emailUpdate.count).toBe(0);
+
+    const emailDelete = await asUser(userA2.id, (tx) =>
+      tx.emailLog.deleteMany({ where: { id: emailLog.id } }),
+    );
+    expect(emailDelete.count).toBe(0);
+  });
+});
