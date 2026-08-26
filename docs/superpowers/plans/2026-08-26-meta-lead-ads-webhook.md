@@ -52,7 +52,7 @@
 - Modify: `tests/tenant-isolation.test.ts`
 
 **Interfaces:**
-- Produces: `app.org_id_for_meta_page()` (SQL function, no args, reads `request.meta_page_id` GUC, returns `UUID | NULL`), `app.meta_page_access_token_for_org(target_org_id UUID)` (SQL function, returns `TEXT | NULL`), Prisma model `OrgMetaCredential { orgId, metaPageId, metaPageAccessToken, createdAt, updatedAt }`, `setMetaPageCredentials({ metaPageId, metaPageAccessToken })` server fn.
+- Produces: `app.org_id_for_meta_page()` (SQL function, no args, reads `request.meta_page_id` GUC, returns `UUID | NULL`), `app.meta_page_access_token_for_org()` (SQL function, no args — derives org_id from the same GUC internally, returns `TEXT | NULL`), Prisma model `OrgMetaCredential { orgId, metaPageId, metaPageAccessToken, createdAt, updatedAt }`, `setMetaPageCredentials({ metaPageId, metaPageAccessToken })` server fn.
 - Consumes: `app.is_org_admin(UUID)` (existing, from `20260815054857_init`), `withUserContext` (existing, `src/lib/db.server.ts`), `requireUserId`/`requirePrimaryOrgId` (existing, `src/lib/current-user.server.ts`).
 
 - [ ] **Step 1: Edit `prisma/schema.prisma` — add `@unique` to `Lead.platformLeadId`**
@@ -225,15 +225,25 @@ $$;
 GRANT EXECUTE ON FUNCTION app.org_id_for_meta_page() TO anon;
 
 -- ============================================================================
--- Fetches a known org's Page access token, for the webhook handler's Graph
--- API call — called directly by application code (never inside an RLS
--- policy), after app.org_id_for_meta_page() has already resolved org_id.
--- Its own SECURITY DEFINER function rather than a SELECT grant on
--- org_meta_credentials, so anon's access stays limited to exactly this one
--- read shape (by org_id, not an open SELECT).
+-- Fetches the Page access token for whichever org the calling session's
+-- verified request.meta_page_id GUC already authorizes — called directly
+-- by application code (never inside an RLS policy), after
+-- app.org_id_for_meta_page() has resolved that same org_id.
+--
+-- Deliberately takes NO org_id parameter — RULING (task 1 review round 1):
+-- the original design took a target_org_id UUID argument with no check
+-- that it matched the GUC-authorized org, so ANY caller able to invoke
+-- this function (its anon EXECUTE grant makes it reachable via Supabase's
+-- public PostgREST RPC surface, not just from this app's own code) could
+-- pass an arbitrary org id and read that org's Meta bearer token —
+-- correctness rested entirely on webhook-handler.ts's calling discipline,
+-- not on anything the database itself enforced. Removing the parameter
+-- and deriving org_id from the GUC internally (same mechanism
+-- app.org_id_for_meta_page() already uses) closes that off structurally:
+-- there is no argument left to pass a wrong org id through.
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION app.meta_page_access_token_for_org(target_org_id UUID)
+CREATE OR REPLACE FUNCTION app.meta_page_access_token_for_org()
 RETURNS TEXT
 LANGUAGE sql
 SECURITY DEFINER
@@ -242,10 +252,10 @@ SET search_path = public
 AS $$
   SELECT meta_page_access_token
   FROM public.org_meta_credentials
-  WHERE org_id = target_org_id;
+  WHERE org_id = app.org_id_for_meta_page();
 $$;
 
-GRANT EXECUTE ON FUNCTION app.meta_page_access_token_for_org(UUID) TO anon;
+GRANT EXECUTE ON FUNCTION app.meta_page_access_token_for_org() TO anon;
 
 
 -- ============================================================================
@@ -379,6 +389,41 @@ describe("org_meta_credentials — admin-only", () => {
 
     const seenByA = await asUser(userA.id, (tx) => tx.orgMetaCredential.findMany());
     expect(seenByA.map((c) => c.orgId)).toEqual([orgA.id]);
+  });
+
+  it("an org admin CAN update and delete their org's meta credentials", async () => {
+    const updated = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.update({
+        where: { orgId: orgB.id },
+        data: { metaPageAccessToken: "rotated-token-b" },
+      }),
+    );
+    expect(updated.metaPageAccessToken).toBe("rotated-token-b");
+
+    const deleted = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgB.id } }),
+    );
+    expect(deleted.count).toBe(1);
+  });
+
+  it("a non-admin CANNOT update or delete meta credentials, even in their own org", async () => {
+    const updateResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { metaPageAccessToken: "hijacked" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const deleteResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleteResult.count).toBe(0);
+
+    const stillThere = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.findUniqueOrThrow({ where: { orgId: orgA.id } }),
+    );
+    expect(stillThere.metaPageId).toBe(orgAMetaPageId);
   });
 
   it("anon has zero access to meta credentials", async () => {
@@ -979,7 +1024,7 @@ async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void
     }
 
     const [tokenRow] = await tx.$queryRaw<{ token: string | null }[]>`
-      SELECT app.meta_page_access_token_for_org(${orgId}::uuid) AS token
+      SELECT app.meta_page_access_token_for_org() AS token
     `;
     const pageAccessToken = tokenRow?.token;
     if (!pageAccessToken) {
