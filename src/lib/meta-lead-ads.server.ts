@@ -14,6 +14,16 @@ const setMetaPageCredentialsSchema = z.object({
  * No app-level role check needed; a non-admin's upsert is simply rejected
  * by Postgres. No UI yet (issue #24) — callable directly until an admin
  * settings screen exists.
+ *
+ * ponytail: no page-ownership verification. metaPageId is globally
+ * unique and first-come-first-served — nothing here checks the calling
+ * org actually controls the Facebook Page being registered, so an org
+ * admin could register another org's real (public) Page ID first and
+ * misattribute their real leads. Upgrade path: once a real Meta Graph
+ * API access token exists, verify via GET /{page-id}?access_token=...
+ * before accepting a registration. See docs/specs/07-meta-lead-ads-webhook.md
+ * ("Known limitation") — this must not be enabled for more than one org
+ * on a shared deployment until that check exists.
  */
 export const setMetaPageCredentials = createServerFn({ method: "POST" })
   .validator(setMetaPageCredentialsSchema)

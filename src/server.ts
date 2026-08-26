@@ -47,12 +47,12 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    const url = new URL(request.url);
-    if (url.pathname === "/api/webhooks/meta-leads") {
-      return handleMetaLeadsWebhook(request);
-    }
-
     try {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/webhooks/meta-leads") {
+        return await handleMetaLeadsWebhook(request);
+      }
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

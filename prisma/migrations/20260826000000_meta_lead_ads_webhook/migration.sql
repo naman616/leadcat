@@ -38,12 +38,18 @@ CREATE UNIQUE INDEX "org_meta_credentials_meta_page_id_key" ON "org_meta_credent
 -- AddForeignKey
 ALTER TABLE "org_meta_credentials" ADD CONSTRAINT "org_meta_credentials_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- AlterTable — idempotency: a retried webhook delivery for the same
--- leadgen_id is a no-op (see src/lib/meta-lead-ads/webhook-handler.ts's
--- skipDuplicates), not a duplicate Lead. Postgres unique indexes already
--- treat NULL as distinct from other NULLs, so no partial/WHERE clause is
+-- CreateIndex — idempotency, org-scoped: a retried webhook delivery for
+-- the same leadgen_id is a no-op (see
+-- src/lib/meta-lead-ads/webhook-handler.ts's skipDuplicates), not a
+-- duplicate Lead. Org-scoped rather than a bare global unique on
+-- leadgen_id so two different orgs independently receiving the same
+-- value (unreachable through real Meta traffic today, since leadgen_id
+-- is globally unique per Meta's own docs, but org-scoped uniqueness is
+-- this schema's convention everywhere else) never collide with each
+-- other. Postgres composite unique indexes already treat NULL as
+-- distinct from other NULLs per-row, so no partial/WHERE clause is
 -- needed — every non-Meta lead's NULL platform_lead_id is unaffected.
-CREATE UNIQUE INDEX "leads_platform_lead_id_key" ON "leads"("platform_lead_id");
+CREATE UNIQUE INDEX "leads_org_id_platform_lead_id_key" ON "leads"("org_id", "platform_lead_id");
 
 
 -- ============================================================================

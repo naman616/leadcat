@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { handleMetaLeadsWebhook } from "../src/lib/meta-lead-ads/webhook-handler";
+import { deterministicIdFor, handleMetaLeadsWebhook } from "../src/lib/meta-lead-ads/webhook-handler";
 
 const APP_SECRET = "test-app-secret";
 const VERIFY_TOKEN = "test-verify-token";
@@ -106,5 +106,30 @@ describe("handleMetaLeadsWebhook", () => {
       new Request("http://localhost/api/webhooks/meta-leads", { method: "DELETE" }),
     );
     expect(response.status).toBe(405);
+  });
+});
+
+describe("deterministicIdFor", () => {
+  it("produces the same id for the same key and salt every time", () => {
+    const id1 = deterministicIdFor("org-1:leadgen-123", "contact");
+    const id2 = deterministicIdFor("org-1:leadgen-123", "contact");
+    expect(id1).toBe(id2);
+  });
+
+  it("produces different ids for different salts on the same key", () => {
+    const contactId = deterministicIdFor("org-1:leadgen-123", "contact");
+    const leadId = deterministicIdFor("org-1:leadgen-123", "lead");
+    expect(contactId).not.toBe(leadId);
+  });
+
+  it("produces different ids for different keys with the same salt", () => {
+    const id1 = deterministicIdFor("org-1:leadgen-123", "contact");
+    const id2 = deterministicIdFor("org-2:leadgen-123", "contact");
+    expect(id1).not.toBe(id2);
+  });
+
+  it("produces a UUID-shaped string", () => {
+    const id = deterministicIdFor("org-1:leadgen-123", "contact");
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 });

@@ -184,7 +184,7 @@ model Lead {
   campaignId     String?   @map("campaign_id") @db.Uuid
   creativeId     String?   @map("creative_id")
   formId         String?   @map("form_id")
-  platformLeadId String?   @unique @map("platform_lead_id")
+  platformLeadId String?   @map("platform_lead_id")
   clickId        String?   @map("click_id")
   utmSource      String?   @map("utm_source")
   utmMedium      String?   @map("utm_medium")
@@ -209,6 +209,7 @@ model Lead {
   callLogs     CallLog[]
   whatsappMessages WhatsAppMessage[]
 
+  @@unique([orgId, platformLeadId])
   @@map("leads")
 }
 

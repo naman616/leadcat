@@ -1979,6 +1979,24 @@ describe("org_meta_credentials — admin-only", () => {
     expect(stillThere.metaPageId).toBe(orgAMetaPageId);
   });
 
+  it("an org admin CANNOT write into another org's meta credentials", async () => {
+    // userB is admin (owner) of orgB only — proves app.is_org_admin(org_id)
+    // is scoped per-org, not "any admin anywhere," distinct from the
+    // same-org non-admin case tested just above.
+    const updateResult = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { metaPageAccessToken: "hijacked-cross-org" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const stillThere = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.findUniqueOrThrow({ where: { orgId: orgA.id } }),
+    );
+    expect(stillThere.metaPageId).toBe(orgAMetaPageId);
+  });
+
   it("anon has zero access to meta credentials", async () => {
     const seen = await asAnon((tx) => tx.orgMetaCredential.findMany());
     expect(seen).toHaveLength(0);

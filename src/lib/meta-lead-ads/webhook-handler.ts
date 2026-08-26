@@ -35,21 +35,22 @@ function isLeadgenChangeValue(value: unknown): value is MetaLeadgenChangeValue {
 }
 
 /**
- * Deterministic UUID-shaped id derived from Meta's leadgen_id — RULING
- * (task 4 review round 1): using randomUUID() here meant a retried
- * webhook delivery for the same leadgen_id got a fresh Contact row every
- * time (skipDuplicates on the Lead insert only protects the Lead row,
- * leaving an orphaned, unreferenced Contact behind on every retry — not
- * the "silent no-op" idempotency the spec requires). Deriving both the
- * contact and lead row ids from leadgen_id (with a distinct salt per
- * table, so they never collide with each other) makes a retry produce
- * the exact same row ids as the original delivery, so skipDuplicates on
- * BOTH inserts now makes the whole write genuinely idempotent — no
- * SELECT needed first (anon has no SELECT policy to do one with anyway).
- * SHA-256 formatted into UUID shape — no new dependency, stdlib only.
+ * Deterministic UUID-shaped id derived from a composite key — RULING
+ * (task 4 review round 1, extended in final whole-branch review): using
+ * randomUUID() meant a retried webhook delivery for the same leadgen_id
+ * got a fresh Contact row every time (skipDuplicates on the Lead insert
+ * only protects the Lead row). Deriving ids from `${orgId}:${leadgenId}`
+ * (not leadgen_id alone) makes a retry produce the exact same row ids as
+ * the original delivery — skipDuplicates on both inserts now makes the
+ * whole write genuinely idempotent — and scopes the derivation by org so
+ * two different orgs can never collide on the same generated ids even in
+ * the (currently unreachable, since Meta's leadgen_id is globally
+ * unique) case of both receiving the same leadgen_id. Exported for its
+ * own direct test — pure function, no DB dependency. SHA-256 formatted
+ * into UUID shape — no new dependency, stdlib only.
  */
-function deterministicIdFor(leadgenId: string, salt: string): string {
-  const hash = createHash("sha256").update(`${salt}:${leadgenId}`).digest("hex");
+export function deterministicIdFor(key: string, salt: string): string {
+  const hash = createHash("sha256").update(`${salt}:${key}`).digest("hex");
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 
@@ -66,9 +67,11 @@ function handleVerificationRequest(url: URL): Response {
   return new Response("Forbidden", { status: 403 });
 }
 
-/** Resolves org + credentials for one leadgen change, fetches field data, writes Contact + Lead. */
-async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void> {
-  await withAnonMetaWebhookContext(value.page_id, async (tx) => {
+/** Resolves org + Page access token for one leadgen change's page_id, or null if unattributable. */
+async function resolveOrgAndToken(
+  pageId: string,
+): Promise<{ orgId: string; pageAccessToken: string } | null> {
+  return withAnonMetaWebhookContext(pageId, async (tx) => {
     const [orgRow] = await tx.$queryRaw<{ id: string | null }[]>`
       SELECT app.org_id_for_meta_page() AS id
     `;
@@ -78,8 +81,8 @@ async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void
       // Unknown page_id — logged, not thrown. Meta disables a subscription
       // after repeated non-200 responses, so this must never surface as an
       // error to the caller. See docs/specs/07-meta-lead-ads-webhook.md.
-      console.error(`[meta-leads webhook] unknown page_id: ${value.page_id}`);
-      return;
+      console.error(`[meta-leads webhook] unknown page_id: ${pageId}`);
+      return null;
     }
 
     const [tokenRow] = await tx.$queryRaw<{ token: string | null }[]>`
@@ -88,14 +91,34 @@ async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void
     const pageAccessToken = tokenRow?.token;
     if (!pageAccessToken) {
       console.error(`[meta-leads webhook] org ${orgId} has no page access token configured`);
-      return;
+      return null;
     }
 
-    const fields = await metaLeadAdsProvider.fetchLeadFields(value.leadgen_id, pageAccessToken);
+    return { orgId, pageAccessToken };
+  });
+}
 
-    const contactId = deterministicIdFor(value.leadgen_id, "contact");
-    const leadId = deterministicIdFor(value.leadgen_id, "lead");
+/**
+ * Resolves org + credentials for one leadgen change, fetches field data,
+ * writes Contact + Lead. Deliberately two separate
+ * withAnonMetaWebhookContext calls, not one — RULING (final whole-branch
+ * review): the Graph API call must not run inside an open DB transaction
+ * (holding a pooled/pgbouncer connection across a real network round
+ * trip risks the connection exhaustion CLAUDE.md calls out by name). The
+ * deterministic ids above make this two-phase split safe against a retry
+ * landing between the two transactions.
+ */
+async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void> {
+  const resolved = await resolveOrgAndToken(value.page_id);
+  if (!resolved) return;
+  const { orgId, pageAccessToken } = resolved;
 
+  const fields = await metaLeadAdsProvider.fetchLeadFields(value.leadgen_id, pageAccessToken);
+
+  const contactId = deterministicIdFor(`${orgId}:${value.leadgen_id}`, "contact");
+  const leadId = deterministicIdFor(`${orgId}:${value.leadgen_id}`, "lead");
+
+  await withAnonMetaWebhookContext(value.page_id, async (tx) => {
     await tx.contact.createMany({
       data: [
         {
