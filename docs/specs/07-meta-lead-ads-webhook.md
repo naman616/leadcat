@@ -11,7 +11,8 @@ earlier docs. Corresponds to GitHub issue #24.
   Meta's verification handshake (`GET`) and incoming lead notifications
   (`POST`), with HMAC signature verification.
 - Per-org storage of which Facebook Page maps to that org, and that page's
-  access token — columns only, no admin UI (per your call).
+  access token — a new admin-only-readable table, no admin UI yet (per
+  your call).
 - A `MetaLeadAdsProvider` interface + `MockMetaLeadAdsProvider` (no real
   Graph API call yet — same "build now, wire real credentials later"
   pattern as `WhatsAppProvider`/`SmsProvider`/`EmailProvider`/telephony).
@@ -41,12 +42,23 @@ earlier docs. Corresponds to GitHub issue #24.
 
 ## Webhook route
 
-New file: `src/routes/api/webhooks/meta-leads.ts`, using TanStack Start's
-file-based **server route** (`createServerFileRoute` — raw `Request`/
-`Response`, not `createServerFn`). This is the first raw API route in the
-app; every other public-facing entry point so far (`website-lead.server.ts`)
-is a `createServerFn` called from the app's own generated RPC client, which
-can't handle Meta's plain-JSON POST or its query-param `GET` handshake.
+**Not** a `src/routes/*` file. Checked: the installed `@tanstack/react-start`
+(1.168.32) / `@tanstack/react-router` (1.170.18) have no file-based
+"server route" / `createServerFileRoute` API in this version — only
+`createServerFn`, which is RPC-shaped for the app's own generated client
+and can't handle Meta's plain-JSON POST or query-param `GET` handshake.
+
+Instead: `src/server.ts` (the app's existing custom server entry —
+already wired via `vite.config.ts`'s `tanstackStart.server.entry: "server"`
+specifically to wrap the SSR response) is the one place every request
+already passes through before TanStack's router. Its exported `fetch`
+gets one new branch at the top: match `/api/webhooks/meta-leads` by
+pathname and method, and if it matches, call
+`handleMetaLeadsWebhook(request)` from a new
+`src/lib/meta-lead-ads/webhook-handler.ts` instead of delegating to
+`getServerEntry()` — raw `Request` in, raw `Response` out, no TanStack
+Router involvement at all for this one path. Everything else continues
+through the existing SSR handler unchanged.
 
 - **`GET`** — Meta's subscription verification handshake. Compares the
   `hub.verify_token` query param against `process.env.META_WEBHOOK_VERIFY_TOKEN`;
@@ -76,17 +88,38 @@ can't handle Meta's plain-JSON POST or its query-param `GET` handshake.
 
 ## Multi-tenancy: which org owns this Page?
 
-New nullable columns on `Organization`:
+**Not** columns on `Organization` — a new table instead:
 
 ```
-metaPageId          String? @unique @map("meta_page_id")
-metaPageAccessToken String? @map("meta_page_access_token")
+model OrgMetaCredential {
+  orgId               String   @id @map("org_id") @db.Uuid
+  metaPageId          String   @unique @map("meta_page_id")
+  metaPageAccessToken String   @map("meta_page_access_token")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("org_meta_credentials")
+}
 ```
 
-Set via a new admin-only server function `setMetaPageCredentials` (RLS:
-`app.is_org_admin(org_id)`, same gate as `updateUnitPrice`/`createTemplate`)
-— no UI this slice, callable directly (e.g. from a REPL or a future admin
-screen).
+Kept off `organizations` deliberately: that table's existing SELECT policy
+(`"org members can view their org"`, from the init migration) is readable
+by **every** org member, not just admins — fine for `public_form_token`
+(worst case a leak lets someone submit fake leads into one org, and it's
+trivially rotatable), but `metaPageAccessToken` is a bearer credential for
+Meta's Graph API — a materially bigger blast radius if any regular team
+member could read it. `org_meta_credentials` gets its own RLS: `SELECT`/
+`INSERT`/`UPDATE`/`DELETE` all gated on `app.is_org_admin(org_id)` — no
+policy at all for non-admin members, so a regular member's query against
+this table returns zero rows, same "absence of a matching policy = zero
+rows" guarantee as everywhere else in this app.
+
+Set via a new server function `setMetaPageCredentials` (`upsert`, relying
+entirely on that RLS gate — no app-level admin check needed, same shape as
+`createTemplate`) — no UI this slice, callable directly (e.g. from a REPL
+or a future admin screen).
 
 ### Why `page_id` doesn't need to be a secret token (unlike `public_form_token`)
 
@@ -106,17 +139,17 @@ Mirrors `20260822080000_website_lead_form_token` exactly, keyed by page
 ID instead of form token:
 
 - `app.org_id_for_meta_page()` — `SECURITY DEFINER`, reads a
-  `request.meta_page_id` GUC, looks up `organizations.meta_page_id`,
+  `request.meta_page_id` GUC, looks up `org_meta_credentials.meta_page_id`,
   returns the org id or `NULL`. Same fixed-search-path, same
   "malformed and unknown both return NULL" shape as
   `app.org_id_for_form_token()`.
 - `app.meta_page_access_token_for_org(org_id UUID)` — `SECURITY DEFINER`,
-  returns that org's `meta_page_access_token`. Called by application code
-  (not by an RLS policy) after `org_id` is already known, to fetch the
-  credential needed for the Graph API call — kept as its own
-  `SECURITY DEFINER` function rather than a direct anon `SELECT` grant on
-  `organizations`, since anon has zero `SELECT` access to that table today
-  and this shouldn't widen that.
+  returns that org's `meta_page_access_token` from `org_meta_credentials`.
+  Called by application code (not by an RLS policy) after `org_id` is
+  already known, to fetch the credential needed for the Graph API call —
+  kept as its own `SECURITY DEFINER` function rather than any direct
+  `SELECT` grant on `org_meta_credentials` to `anon`, since anon has zero
+  access to that table otherwise and this shouldn't widen it.
 - `withAnonMetaWebhookContext(pageId, fn)` — new wrapper in
   `db.server.ts`, parallel to `withAnonFormContext`: `SET LOCAL ROLE anon`
   + `SET LOCAL "request.meta_page_id" TO '<pageId>'`.
@@ -156,8 +189,9 @@ string-typed room for exactly this:
 - `Lead.source` = `"Meta Lead Ads"`, `Lead.subSource` = the Page name/ID —
   same field used as `"Website"` in `website-lead.server.ts`.
 
-No `Lead`/`Organization` schema changes needed beyond the two new
-`Organization` columns above.
+No `Lead` schema changes beyond the `@unique` on `platformLeadId` (see
+Idempotency below); no `Organization` schema changes at all — credentials
+live entirely in the new `org_meta_credentials` table above.
 
 ## Provider abstraction
 
@@ -193,13 +227,14 @@ receiver to have.
 
 `prisma/migrations/<timestamp>_meta_lead_ads_webhook/migration.sql` —
 hand-authored (no network path to the real Supabase DB from this sandbox,
-same as every earlier migration here). Adds: `organizations.meta_page_id`
-(+ unique index), `organizations.meta_page_access_token`, unique index on
-`leads.platform_lead_id`, the two `SECURITY DEFINER` functions, and the
-two new anon `INSERT` policies. Verified via `prisma validate` +
-`db:generate` and a local throwaway Postgres container — **not** applied
-to the real Mumbai Supabase DB by this session; needs the same explicit
-`prisma migrate deploy` sign-off as every other migration.
+same as every earlier migration here). Adds: the `org_meta_credentials`
+table (RLS enabled, admin-only SELECT/INSERT/UPDATE/DELETE), a unique
+index on `leads.platform_lead_id`, the two `SECURITY DEFINER` functions,
+and the two new anon `INSERT` policies on `contacts`/`leads`. Verified via
+`prisma validate` + `db:generate` and a local throwaway Postgres container
+— **not** applied to the real Mumbai Supabase DB by this session; needs
+the same explicit `prisma migrate deploy` sign-off as every other
+migration.
 
 ## New env vars
 
