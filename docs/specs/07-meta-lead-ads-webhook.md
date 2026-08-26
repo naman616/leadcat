@@ -52,13 +52,22 @@ Instead: `src/server.ts` (the app's existing custom server entry —
 already wired via `vite.config.ts`'s `tanstackStart.server.entry: "server"`
 specifically to wrap the SSR response) is the one place every request
 already passes through before TanStack's router. Its exported `fetch`
-gets one new branch at the top: match `/api/webhooks/meta-leads` by
-pathname and method, and if it matches, call
-`handleMetaLeadsWebhook(request)` from a new
-`src/lib/meta-lead-ads/webhook-handler.ts` instead of delegating to
+gets one new branch: match `/api/webhooks/meta-leads` by pathname and
+method, and if it matches, call `handleMetaLeadsWebhook(request)` from a
+new `src/lib/meta-lead-ads/webhook-handler.ts` instead of delegating to
 `getServerEntry()` — raw `Request` in, raw `Response` out, no TanStack
 Router involvement at all for this one path. Everything else continues
 through the existing SSR handler unchanged.
+
+**Updated per final whole-branch review — the branch must sit inside the
+existing `try` block, not above it.** The first implementation placed the
+new branch before `fetch`'s `try { ... } catch { ... }`, so anything that
+throws before `handleMetaLeadsWebhook` gets a chance to run its own
+internal error handling (a truncated/aborted request body, a thrown
+`URL` parse) — on an unauthenticated, internet-reachable endpoint — would
+reject the exported `fetch` itself with no `renderErrorPage` fallback,
+unlike every other route. Moved inside the `try`, so the existing catch's
+500 response covers this path too.
 
 - **`GET`** — Meta's subscription verification handshake. Compares the
   `hub.verify_token` query param against `process.env.META_WEBHOOK_VERIFY_TOKEN`;
@@ -121,6 +130,34 @@ entirely on that RLS gate — no app-level admin check needed, same shape as
 `createTemplate`) — no UI this slice, callable directly (e.g. from a REPL
 or a future admin screen).
 
+### Known limitation: no page-ownership verification (KNOWN GAP, flagged for the human review gate — found in final whole-branch review)
+
+`setMetaPageCredentials` accepts any `metaPageId` string from any org
+admin, with nothing checking that the caller actually controls that
+Facebook Page. `meta_page_id` is globally unique across the whole
+deployment, so this is first-come-first-served: an org admin who knows
+(or guesses) another org's real, public Page ID can register it before
+that org does, and — since the HMAC signature only proves a webhook
+delivery genuinely came from Meta, not that the *registrant* owns the
+Page it's about — every subsequent genuinely-Meta-signed lead for that
+Page gets attributed to the wrong org's `contacts`/`leads`. RLS behaves
+exactly as designed throughout; the org-resolution step itself has no
+ownership proof to check.
+
+This can't be closed without a real Meta Graph API call at registration
+time (`GET /{page-id}?access_token=...`, confirming the supplied token
+actually grants access to that page) — blocked on the same vendor
+dependency (a real Meta App + Page + access token) as the rest of this
+feature's real-provider swap. Until that exists: **this feature must not
+be enabled for more than one org on a shared deployment without someone
+trusted (not self-serve by org admins) controlling who gets credentials
+set for which page** — the "no UI yet, backend-only, callable directly"
+design already limits this to whoever has direct code/API access today,
+but that is operational discipline, not a structural guarantee, and
+needs to be an explicit decision at the human review gate, not an
+assumption. See the `ponytail:` comment on `setMetaPageCredentials` in
+`src/lib/meta-lead-ads.server.ts` for the same note at the code site.
+
 ### Why `page_id` doesn't need to be a secret token (unlike `public_form_token`)
 
 `public_form_token` exists because an anonymous browser's *only* proof of
@@ -132,6 +169,15 @@ safe — a forged request can't get a valid signature without the app
 secret. So `page_id` can be a plain (not secret, not rotatable-as-a-token)
 identifier, and the RLS design below mirrors `public_form_token`'s
 mechanism but doesn't need its secrecy property.
+
+**Scope of this claim — authenticity, not ownership.** The signature
+proves the *delivery* is genuinely from Meta and its `page_id` is
+unforged. It says nothing about which org is *entitled* to register that
+`page_id` in the first place — that's the separate, still-open gap
+described in "Known limitation" above. The two are easy to conflate:
+"the `page_id` in a signed payload can be trusted" (true) is not the same
+claim as "whoever registered that `page_id` was allowed to" (not
+verified by anything in this design).
 
 ### RLS / anon-write mechanism
 
@@ -189,9 +235,10 @@ string-typed room for exactly this:
 - `Lead.source` = `"Meta Lead Ads"`, `Lead.subSource` = the Page name/ID —
   same field used as `"Website"` in `website-lead.server.ts`.
 
-No `Lead` schema changes beyond the `@unique` on `platformLeadId` (see
-Idempotency below); no `Organization` schema changes at all — credentials
-live entirely in the new `org_meta_credentials` table above.
+No `Lead` schema changes beyond the org-scoped uniqueness on
+`platformLeadId` (see Idempotency below); no `Organization` schema
+changes at all — credentials live entirely in the new
+`org_meta_credentials` table above.
 
 ## Provider abstraction
 
@@ -216,20 +263,52 @@ array into the same return shape — single swap point in
 ## Idempotency
 
 `Lead.platformLeadId` (already the right field in intent — Meta's
-`leadgen_id`, just not currently `@unique`) gains a `@unique` constraint,
-rather than adding a parallel column. `createMany({ data: [...],
-skipDuplicates: true })` for the `Lead` insert means a retried webhook
-delivery for the same `leadgen_id` is a silent no-op, not a duplicate
-Lead or a thrown error — same idempotency shape Meta's own docs expect a
-receiver to have.
+`leadgen_id`, just not previously unique) gains a `@@unique([orgId,
+platformLeadId])` constraint (org-scoped, not a bare global `@unique` —
+see the "Open questions" update below for why). `createMany({ data:
+[...], skipDuplicates: true })` for the `Lead` insert means a retried
+webhook delivery for the same `leadgen_id` is a silent no-op, not a
+duplicate Lead or a thrown error — same idempotency shape Meta's own
+docs expect a receiver to have.
+
+**Updated per final whole-branch review — Contact rows need the same
+protection.** The first implementation generated a random id for the
+`Contact` row on every delivery; `skipDuplicates` only protected the
+`Lead` insert, so a retry still left behind an orphaned, unreferenced
+`Contact` no `Lead` pointed to. Fixed by deriving both the `Contact` and
+`Lead` row ids deterministically from `${orgId}:${leadgenId}` (SHA-256
+hashed, formatted into UUID shape — the org prefix also closes a related
+gap: without it, two different orgs receiving the same `leadgen_id`
+would collide on the same generated ids, which the global-vs-org-scoped
+`platformLeadId` uniqueness question above independently already
+guards against, but the id derivation itself needed the same scoping)
+with `skipDuplicates: true` added to the `Contact` insert too. A retry
+now produces identical ids on both tables, so both inserts genuinely
+no-op together.
+
+**Also updated — the Graph API call must not run inside the write
+transaction.** The original design called
+`metaLeadAdsProvider.fetchLeadFields(...)` from inside the same
+`withAnonMetaWebhookContext` transaction as the two inserts. With the
+mock provider this is instant and harmless, but the real provider will
+be an actual network call to `graph.facebook.com` — holding a pooled
+Postgres connection (pgbouncer, transaction mode) open across an
+external HTTP round trip is exactly the connection-exhaustion failure
+mode this project's `CLAUDE.md` calls out by name. Fixed by splitting
+into two short `withAnonMetaWebhookContext` calls: the first resolves
+`orgId` + the page access token and returns; the provider call happens
+outside any transaction; the second (short) transaction does the two
+`createMany` inserts. The deterministic ids above make this two-phase
+split safe against a retry landing between the two transactions.
 
 ## New migration
 
 `prisma/migrations/<timestamp>_meta_lead_ads_webhook/migration.sql` —
 hand-authored (no network path to the real Supabase DB from this sandbox,
 same as every earlier migration here). Adds: the `org_meta_credentials`
-table (RLS enabled, admin-only SELECT/INSERT/UPDATE/DELETE), a unique
-index on `leads.platform_lead_id`, the two `SECURITY DEFINER` functions,
+table (RLS enabled, admin-only SELECT/INSERT/UPDATE/DELETE), an
+org-scoped unique index on `(org_id, platform_lead_id)`, the two
+`SECURITY DEFINER` functions,
 and the two new anon `INSERT` policies on `contacts`/`leads`. Verified via
 `prisma validate` + `db:generate` and a local throwaway Postgres container
 — **not** applied to the real Mumbai Supabase DB by this session; needs
@@ -264,6 +343,19 @@ Both app-level (one Meta App per LeadCat deployment), unlike
 - Manual `curl` smoke test against a local dev server using a
   hand-computed HMAC signature, since there's no real Meta account to test
   against end-to-end.
+- **Added per final whole-branch review:** `org_meta_credentials` needs an
+  explicit cross-org admin-write test (org B's admin attempting to write
+  into org A's row, expect rejection) — this table has the largest
+  credential blast radius in the app, and its cross-org isolation
+  deserved its own assertion rather than being covered only by pattern
+  precedent from `app.is_org_admin`'s use elsewhere.
+- **Added per final whole-branch review:** `deterministicIdFor` (the
+  function introduced in the Task 4 fix round above) needs its own direct
+  test — same input produces the same id, different salts produce
+  different ids, output is UUID-shaped — since it's a pure function with
+  no DB dependency, exportable and testable in
+  `tests/meta-lead-ads-webhook-handler.test.ts` without touching the
+  DB-touching-vs-DB-free boundary that file's design otherwise maintains.
 
 ## Open questions for you
 
@@ -273,7 +365,14 @@ Both app-level (one Meta App per LeadCat deployment), unlike
   you'd see it? There's no logging/alerting infrastructure in this repo
   yet beyond `console.log`/`console.error` — flagging rather than building
   one, per "don't reach for infrastructure prematurely."
-- `platformLeadId` gaining a `@unique` constraint: any existing data risk?
-  (Believed none — this column is currently unpopulated in production per
-  `01-leads.md`, but confirming before adding a `@unique` migration to a
-  live table.)
+- `platformLeadId` gaining a uniqueness constraint: any existing data
+  risk? (Believed none — this column is currently unpopulated in
+  production per `01-leads.md`, but confirming before adding a unique
+  index migration to a live table.) **Updated per final review:** the
+  constraint is now `@@unique([orgId, platformLeadId])` rather than a
+  bare global `@unique` on `platformLeadId` alone — a global constraint
+  meant two different orgs could never independently receive a lead
+  carrying the same `leadgen_id` (theoretically unreachable through real
+  Meta traffic today since `leadgen_id` is globally unique per Meta's own
+  docs, but org-scoped uniqueness is this schema's convention everywhere
+  else, and it removes a needless cross-tenant coupling for free).
