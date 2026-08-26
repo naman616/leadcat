@@ -33,4 +33,9 @@ describe("verifyMetaSignature", () => {
   it("rejects a malformed signature header (no sha256= prefix)", () => {
     expect(verifyMetaSignature("{}", "not-a-valid-header", SECRET)).toBe(false);
   });
+
+  it("rejects a well-formed but short/malformed hex signature without throwing", () => {
+    const body = JSON.stringify({ entry: [] });
+    expect(verifyMetaSignature(body, "sha256=abcd", SECRET)).toBe(false);
+  });
 });
