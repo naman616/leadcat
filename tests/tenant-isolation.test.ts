@@ -69,6 +69,21 @@ async function asAnonWithFormToken<T>(formToken: string, fn: (tx: Tx) => Promise
   });
 }
 
+/**
+ * Same idea, for the Meta Lead Ads webhook's anon write path (issue #24).
+ * Sets a "request.meta_page_id" GUC, which app.org_id_for_meta_page()
+ * (prisma/migrations/20260826000000_meta_lead_ads_webhook) reads to
+ * resolve which org, if any, this Page ID authorizes an INSERT into.
+ * Mirrors withAnonMetaWebhookContext in src/lib/db.server.ts exactly.
+ */
+async function asAnonWithMetaPage<T>(pageId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+    await tx.$executeRawUnsafe(`SET LOCAL "request.meta_page_id" TO '${pageId}'`);
+    return fn(tx);
+  });
+}
+
 const run = randomUUID().slice(0, 8);
 
 const orgA = { id: randomUUID(), name: "Org A Realty", slug: `org-a-${run}` };
@@ -1886,5 +1901,175 @@ describe("whatsapp template and message isolation", () => {
 
     const activityCountAfter = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
     expect(activityCountAfter).toBe(activityCountBefore);
+  });
+});
+
+// Regression tests for 20260826000000_meta_lead_ads_webhook and
+// src/lib/meta-lead-ads.server.ts / webhook-handler.ts — issue #24.
+describe("org_meta_credentials — admin-only", () => {
+  const orgAMetaPageId = `meta-page-a-${run}`;
+
+  it("an org admin CAN create their org's meta credentials", async () => {
+    const created = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.create({
+        data: { orgId: orgA.id, metaPageId: orgAMetaPageId, metaPageAccessToken: "secret-token-a" },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT create meta credentials, even in their own org", async () => {
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.orgMetaCredential.create({
+          data: { orgId: orgA.id, metaPageId: `rejected-${run}`, metaPageAccessToken: "nope" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a non-admin CANNOT read meta credentials, even in their own org", async () => {
+    const seen = await asUser(agentX.id, (tx) => tx.orgMetaCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+
+  it("an org admin can read their own org's meta credentials, not another org's", async () => {
+    await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.create({
+        data: { orgId: orgB.id, metaPageId: `meta-page-b-${run}`, metaPageAccessToken: "secret-token-b" },
+      }),
+    );
+
+    const seenByA = await asUser(userA.id, (tx) => tx.orgMetaCredential.findMany());
+    expect(seenByA.map((c) => c.orgId)).toEqual([orgA.id]);
+  });
+
+  it("anon has zero access to meta credentials", async () => {
+    const seen = await asAnon((tx) => tx.orgMetaCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("meta lead ads webhook — anon page-id write path", () => {
+  const orgAMetaPageId = `meta-page-a-${run}`;
+
+  // org_meta_credentials.org_id is a primary key — one row per org, so
+  // this can't create a second row alongside the "org_meta_credentials —
+  // admin-only" describe block above (which may or may not have run yet,
+  // depending on file order). upsert makes this block self-sufficient
+  // either way: idempotent whether that row already exists or not, so
+  // this block's tests don't depend on sibling-describe execution order.
+  // Seeded directly via the base prisma client (bypasses RLS), same as
+  // the outer file's beforeAll seeding orgA/contactA/leadA.
+  beforeAll(async () => {
+    await prisma.orgMetaCredential.upsert({
+      where: { orgId: orgA.id },
+      create: { orgId: orgA.id, metaPageId: orgAMetaPageId, metaPageAccessToken: "webhook-test-token" },
+      update: { metaPageId: orgAMetaPageId, metaPageAccessToken: "webhook-test-token" },
+    });
+  });
+
+  it("a valid page id can create a contact + lead in its own org", async () => {
+    const metaContactId = randomUUID();
+    const metaLeadId = randomUUID();
+
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({
+        data: [{ id: metaContactId, orgId: orgA.id, fullName: "Meta Lead", phone: "9999999999" }],
+      }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [
+          {
+            id: metaLeadId,
+            orgId: orgA.id,
+            contactId: metaContactId,
+            source: "Meta Lead Ads",
+            platformLeadId: `leadgen-${run}-1`,
+          },
+        ],
+      }),
+    );
+
+    const contact = await asUser(userA.id, (tx) =>
+      tx.contact.findUniqueOrThrow({ where: { id: metaContactId } }),
+    );
+    expect(contact.orgId).toBe(orgA.id);
+
+    const lead = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: metaLeadId } }),
+    );
+    expect(lead.orgId).toBe(orgA.id);
+    expect(lead.platformLeadId).toBe(`leadgen-${run}-1`);
+  });
+
+  it("an unknown page id creates nothing — rejected, not silently attributed anywhere", async () => {
+    await expect(
+      asAnonWithMetaPage(`unknown-page-${run}`, (tx) =>
+        tx.contact.create({ data: { orgId: orgA.id, fullName: "Should never exist" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("org A's page id can never create data attributed to org B", async () => {
+    await expect(
+      asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+        tx.contact.create({ data: { orgId: orgB.id, fullName: "Cross-org attempt" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a retried leadgen_id does not create a second lead (skipDuplicates)", async () => {
+    const firstContactId = randomUUID();
+    const firstLeadId = randomUUID();
+    const leadgenId = `leadgen-${run}-retry`;
+
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({ data: [{ id: firstContactId, orgId: orgA.id, fullName: "First Attempt" }] }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [{ id: firstLeadId, orgId: orgA.id, contactId: firstContactId, platformLeadId: leadgenId }],
+        skipDuplicates: true,
+      }),
+    );
+
+    // Simulated retry: same leadgen_id, different generated row ids — a
+    // fresh webhook delivery wouldn't know the first attempt's ids.
+    const retryContactId = randomUUID();
+    const retryLeadId = randomUUID();
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({ data: [{ id: retryContactId, orgId: orgA.id, fullName: "Retry Attempt" }] }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [{ id: retryLeadId, orgId: orgA.id, contactId: retryContactId, platformLeadId: leadgenId }],
+        skipDuplicates: true,
+      }),
+    );
+
+    const matchingLeads = await asUser(userA.id, (tx) =>
+      tx.lead.findMany({ where: { platformLeadId: leadgenId } }),
+    );
+    expect(matchingLeads).toHaveLength(1);
+    expect(matchingLeads[0]?.id).toBe(firstLeadId);
+  });
+
+  it("a valid page id grants INSERT only on contacts — never SELECT, UPDATE, or DELETE", async () => {
+    const seen = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.findMany({ where: { orgId: orgA.id } }),
+    );
+    expect(seen).toHaveLength(0);
+
+    const updated = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.updateMany({ where: { orgId: orgA.id }, data: { fullName: "Hijacked" } }),
+    );
+    expect(updated.count).toBe(0);
+
+    const deleted = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleted.count).toBe(0);
   });
 });
