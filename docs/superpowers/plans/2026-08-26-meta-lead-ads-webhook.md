@@ -958,7 +958,7 @@ Expected: FAIL — `webhook-handler.ts` doesn't exist yet.
 - [ ] **Step 4: Write `src/lib/meta-lead-ads/webhook-handler.ts`**
 
 ```ts
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { withAnonMetaWebhookContext } from "../db.server";
 import { MockMetaLeadAdsProvider } from "./mock-provider";
 import type { MetaLeadAdsProvider } from "./provider";
@@ -992,6 +992,25 @@ function isLeadgenChangeValue(value: unknown): value is MetaLeadgenChangeValue {
     typeof v["leadgen_id"] === "string" &&
     typeof v["form_id"] === "string"
   );
+}
+
+/**
+ * Deterministic UUID-shaped id derived from Meta's leadgen_id — RULING
+ * (task 4 review round 1): using randomUUID() here meant a retried
+ * webhook delivery for the same leadgen_id got a fresh Contact row every
+ * time (skipDuplicates on the Lead insert only protects the Lead row,
+ * leaving an orphaned, unreferenced Contact behind on every retry — not
+ * the "silent no-op" idempotency the spec requires). Deriving both the
+ * contact and lead row ids from leadgen_id (with a distinct salt per
+ * table, so they never collide with each other) makes a retry produce
+ * the exact same row ids as the original delivery, so skipDuplicates on
+ * BOTH inserts now makes the whole write genuinely idempotent — no
+ * SELECT needed first (anon has no SELECT policy to do one with anyway).
+ * SHA-256 formatted into UUID shape — no new dependency, stdlib only.
+ */
+function deterministicIdFor(leadgenId: string, salt: string): string {
+  const hash = createHash("sha256").update(`${salt}:${leadgenId}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 
 /** GET — Meta's subscription verification handshake. */
@@ -1034,8 +1053,8 @@ async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void
 
     const fields = await metaLeadAdsProvider.fetchLeadFields(value.leadgen_id, pageAccessToken);
 
-    const contactId = randomUUID();
-    const leadId = randomUUID();
+    const contactId = deterministicIdFor(value.leadgen_id, "contact");
+    const leadId = deterministicIdFor(value.leadgen_id, "lead");
 
     await tx.contact.createMany({
       data: [
@@ -1047,6 +1066,7 @@ async function processLeadgenChange(value: MetaLeadgenChangeValue): Promise<void
           email: fields.email ? fields.email.toLowerCase() : null,
         },
       ],
+      skipDuplicates: true, // idempotent against Meta's webhook retries, same reason as the Lead insert below.
     });
 
     // Meta's campaign_id/adgroup_id/ad_id are large numeric strings, not
@@ -1104,7 +1124,16 @@ async function handleLeadNotification(request: Request): Promise<Response> {
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
       if (change.field !== "leadgen" || !isLeadgenChangeValue(change.value)) continue;
-      await processLeadgenChange(change.value);
+      try {
+        await processLeadgenChange(change.value);
+      } catch (error) {
+        // RULING (task 4 review round 1): one failing entry in a batch
+        // must not sink the whole delivery's 200 response — Meta disables
+        // a subscription after repeated non-200/timeout responses, and an
+        // uncaught throw here would abort every remaining entry/change in
+        // this same payload too, not just the one that failed.
+        console.error(`[meta-leads webhook] failed to process leadgen change:`, error);
+      }
     }
   }
 
