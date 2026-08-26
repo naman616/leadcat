@@ -1944,6 +1944,41 @@ describe("org_meta_credentials — admin-only", () => {
     expect(seenByA.map((c) => c.orgId)).toEqual([orgA.id]);
   });
 
+  it("an org admin CAN update and delete their org's meta credentials", async () => {
+    const updated = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.update({
+        where: { orgId: orgB.id },
+        data: { metaPageAccessToken: "rotated-token-b" },
+      }),
+    );
+    expect(updated.metaPageAccessToken).toBe("rotated-token-b");
+
+    const deleted = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgB.id } }),
+    );
+    expect(deleted.count).toBe(1);
+  });
+
+  it("a non-admin CANNOT update or delete meta credentials, even in their own org", async () => {
+    const updateResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { metaPageAccessToken: "hijacked" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const deleteResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleteResult.count).toBe(0);
+
+    const stillThere = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.findUniqueOrThrow({ where: { orgId: orgA.id } }),
+    );
+    expect(stillThere.metaPageId).toBe(orgAMetaPageId);
+  });
+
   it("anon has zero access to meta credentials", async () => {
     const seen = await asAnon((tx) => tx.orgMetaCredential.findMany());
     expect(seen).toHaveLength(0);
