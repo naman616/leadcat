@@ -158,6 +158,13 @@ needs to be an explicit decision at the human review gate, not an
 assumption. See the `ponytail:` comment on `setMetaPageCredentials` in
 `src/lib/meta-lead-ads.server.ts` for the same note at the code site.
 
+**Decision (2026-09-01, PR #59 review):** accepted as a known limitation
+for now — not blocking merge. Operational discipline (trusted-only
+credential setting, no self-serve admin UI) is the mitigation until a
+real Meta Graph API call can close this structurally; revisit if/when
+this feature is enabled for more than one org or a self-serve admin UI
+is built.
+
 ### Why `page_id` doesn't need to be a secret token (unlike `public_form_token`)
 
 `public_form_token` exists because an anonymous browser's *only* proof of
