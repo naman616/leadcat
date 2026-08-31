@@ -118,10 +118,34 @@ const leadForHandoff = {
 };
 
 // Inventory fixtures for the unit price history tests below.
-const projectA = { id: randomUUID(), orgId: orgA.id, name: "Project A", city: "Pune", type: "Residential" as const };
-const projectB = { id: randomUUID(), orgId: orgB.id, name: "Project B", city: "Pune", type: "Residential" as const };
-const unitA = { id: randomUUID(), orgId: orgA.id, projectId: projectA.id, unitNumber: "A-101", price: "50L" };
-const unitB = { id: randomUUID(), orgId: orgB.id, projectId: projectB.id, unitNumber: "B-101", price: "60L" };
+const projectA = {
+  id: randomUUID(),
+  orgId: orgA.id,
+  name: "Project A",
+  city: "Pune",
+  type: "Residential" as const,
+};
+const projectB = {
+  id: randomUUID(),
+  orgId: orgB.id,
+  name: "Project B",
+  city: "Pune",
+  type: "Residential" as const,
+};
+const unitA = {
+  id: randomUUID(),
+  orgId: orgA.id,
+  projectId: projectA.id,
+  unitNumber: "A-101",
+  price: "50L",
+};
+const unitB = {
+  id: randomUUID(),
+  orgId: orgB.id,
+  projectId: projectB.id,
+  unitNumber: "B-101",
+  price: "60L",
+};
 
 // Populated in beforeAll from the DB-generated defaults — not set on the
 // literals above, since publicFormToken is gen_random_uuid()-defaulted,
@@ -418,7 +442,6 @@ describe("org governance and lead-handoff regressions", () => {
   });
 });
 
-
 // Regression tests for issue #19 (project media metadata) — see
 // prisma/migrations/20260819010000_project_media and
 // docs/specs/02-inventory.md's "project_media" section. Mirrors the
@@ -583,7 +606,9 @@ describe("task isolation and permissions", () => {
 
     await expect(
       asUser(userB.id, (tx) =>
-        tx.task.create({ data: { orgId: orgA.id, title: "Cross-org insert", createdBy: userB.id } }),
+        tx.task.create({
+          data: { orgId: orgA.id, title: "Cross-org insert", createdBy: userB.id },
+        }),
       ),
     ).rejects.toThrow(/row-level security/);
   });
@@ -809,7 +834,9 @@ describe("ad hierarchy isolation", () => {
     const seenByA = await asUser(userA.id, (tx) => tx.adAccount.findMany());
     expect(seenByA.map((a) => a.id)).toContain(account.id);
 
-    const seenByB = await asUser(userB.id, (tx) => tx.adAccount.findUnique({ where: { id: account.id } }));
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.adAccount.findUnique({ where: { id: account.id } }),
+    );
     expect(seenByB).toBeNull();
   });
 
@@ -861,10 +888,20 @@ describe("ad hierarchy isolation", () => {
 
   it("org members can view ads, and an org admin can create/delete a leaf ad", async () => {
     const account = await prisma.adAccount.create({
-      data: { orgId: orgA.id, platform: "meta", externalAccountId: "act_ads", name: "Ads test account" },
+      data: {
+        orgId: orgA.id,
+        platform: "meta",
+        externalAccountId: "act_ads",
+        name: "Ads test account",
+      },
     });
     const campaign = await prisma.campaign.create({
-      data: { orgId: orgA.id, adAccountId: account.id, externalCampaignId: "camp_1", name: "Campaign" },
+      data: {
+        orgId: orgA.id,
+        adAccountId: account.id,
+        externalCampaignId: "camp_1",
+        name: "Campaign",
+      },
     });
     const adSet = await prisma.adSet.create({
       data: { orgId: orgA.id, campaignId: campaign.id, externalAdSetId: "adset_1", name: "Ad set" },
@@ -876,10 +913,14 @@ describe("ad hierarchy isolation", () => {
       }),
     );
 
-    const seenByAgent = await asUser(agentX.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.ad.findUnique({ where: { id: createdAd.id } }),
+    );
     expect(seenByAgent?.id).toBe(createdAd.id);
 
-    const seenByB = await asUser(userB.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.ad.findUnique({ where: { id: createdAd.id } }),
+    );
     expect(seenByB).toBeNull();
 
     const nonAdminDelete = await asUser(agentX.id, (tx) =>
@@ -887,7 +928,9 @@ describe("ad hierarchy isolation", () => {
     );
     expect(nonAdminDelete.count).toBe(0);
 
-    const adminDelete = await asUser(userA2.id, (tx) => tx.ad.deleteMany({ where: { id: createdAd.id } }));
+    const adminDelete = await asUser(userA2.id, (tx) =>
+      tx.ad.deleteMany({ where: { id: createdAd.id } }),
+    );
     expect(adminDelete.count).toBe(1);
   });
 });
@@ -1305,12 +1348,16 @@ describe("booking flow isolation", () => {
   });
 
   it("a non-admin cannot delete a booking, even in their own org", async () => {
-    const result = await asUser(agentX.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    const result = await asUser(agentX.id, (tx) =>
+      tx.booking.deleteMany({ where: { id: bookingA.id } }),
+    );
     expect(result.count).toBe(0);
   });
 
   it("an org admin CAN delete a booking in their own org", async () => {
-    const result = await asUser(userA2.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    const result = await asUser(userA2.id, (tx) =>
+      tx.booking.deleteMany({ where: { id: bookingA.id } }),
+    );
     expect(result.count).toBe(1);
   });
 
@@ -1430,7 +1477,9 @@ describe("sms/email logging isolation", () => {
     expect(emailSeenByB.every((e) => e.orgId === orgB.id)).toBe(true);
 
     const orgASms = await prisma.smsLog.findFirstOrThrow({ where: { orgId: orgA.id } });
-    const direct = await asUser(userB.id, (tx) => tx.smsLog.findUnique({ where: { id: orgASms.id } }));
+    const direct = await asUser(userB.id, (tx) =>
+      tx.smsLog.findUnique({ where: { id: orgASms.id } }),
+    );
     expect(direct).toBeNull();
   });
 
@@ -1455,7 +1504,12 @@ describe("sms/email logging isolation", () => {
     await expect(
       asUser(userB.id, (tx) =>
         tx.emailLog.create({
-          data: { orgId: orgA.id, toAddress: "x@example.com", subject: "x", body: "Cross-org attempt" },
+          data: {
+            orgId: orgA.id,
+            toAddress: "x@example.com",
+            subject: "x",
+            body: "Cross-org attempt",
+          },
         }),
       ),
     ).rejects.toThrow(/row-level security/);
@@ -1475,7 +1529,9 @@ describe("sms/email logging isolation", () => {
     );
     expect(smsUpdate.count).toBe(0);
 
-    const smsDelete = await asUser(userA2.id, (tx) => tx.smsLog.deleteMany({ where: { id: smsLog.id } }));
+    const smsDelete = await asUser(userA2.id, (tx) =>
+      tx.smsLog.deleteMany({ where: { id: smsLog.id } }),
+    );
     expect(smsDelete.count).toBe(0);
 
     const emailUpdate = await asUser(userA2.id, (tx) =>
@@ -1613,7 +1669,9 @@ describe("call log isolation and click-to-call atomicity", () => {
     expect(result.activity.type).toBe("call");
     expect(result.activity.body).toContain("mock-test-call");
 
-    const storedCallLog = await prisma.callLog.findUniqueOrThrow({ where: { id: result.callLog.id } });
+    const storedCallLog = await prisma.callLog.findUniqueOrThrow({
+      where: { id: result.callLog.id },
+    });
     const storedActivity = await prisma.leadActivity.findUniqueOrThrow({
       where: { id: result.activity.id },
     });
@@ -1719,7 +1777,9 @@ describe("whatsapp template and message isolation", () => {
     );
     expect(deleteResult.count).toBe(0);
 
-    const stillThere = await prisma.whatsAppTemplate.findUniqueOrThrow({ where: { id: template.id } });
+    const stillThere = await prisma.whatsAppTemplate.findUniqueOrThrow({
+      where: { id: template.id },
+    });
     expect(stillThere.body).toBe("Original body");
   });
 
@@ -1729,7 +1789,10 @@ describe("whatsapp template and message isolation", () => {
     });
 
     const updated = await asUser(userA2.id, (tx) =>
-      tx.whatsAppTemplate.update({ where: { id: template.id }, data: { body: "Updated by admin" } }),
+      tx.whatsAppTemplate.update({
+        where: { id: template.id },
+        data: { body: "Updated by admin" },
+      }),
     );
     expect(updated.body).toBe("Updated by admin");
 
@@ -1936,7 +1999,11 @@ describe("org_meta_credentials — admin-only", () => {
   it("an org admin can read their own org's meta credentials, not another org's", async () => {
     await asUser(userB.id, (tx) =>
       tx.orgMetaCredential.create({
-        data: { orgId: orgB.id, metaPageId: `meta-page-b-${run}`, metaPageAccessToken: "secret-token-b" },
+        data: {
+          orgId: orgB.id,
+          metaPageId: `meta-page-b-${run}`,
+          metaPageAccessToken: "secret-token-b",
+        },
       }),
     );
 
@@ -2017,7 +2084,11 @@ describe("meta lead ads webhook — anon page-id write path", () => {
   beforeAll(async () => {
     await prisma.orgMetaCredential.upsert({
       where: { orgId: orgA.id },
-      create: { orgId: orgA.id, metaPageId: orgAMetaPageId, metaPageAccessToken: "webhook-test-token" },
+      create: {
+        orgId: orgA.id,
+        metaPageId: orgAMetaPageId,
+        metaPageAccessToken: "webhook-test-token",
+      },
       update: { metaPageId: orgAMetaPageId, metaPageAccessToken: "webhook-test-token" },
     });
   });
@@ -2079,11 +2150,15 @@ describe("meta lead ads webhook — anon page-id write path", () => {
     const leadgenId = `leadgen-${run}-retry`;
 
     await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
-      tx.contact.createMany({ data: [{ id: firstContactId, orgId: orgA.id, fullName: "First Attempt" }] }),
+      tx.contact.createMany({
+        data: [{ id: firstContactId, orgId: orgA.id, fullName: "First Attempt" }],
+      }),
     );
     await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
       tx.lead.createMany({
-        data: [{ id: firstLeadId, orgId: orgA.id, contactId: firstContactId, platformLeadId: leadgenId }],
+        data: [
+          { id: firstLeadId, orgId: orgA.id, contactId: firstContactId, platformLeadId: leadgenId },
+        ],
         skipDuplicates: true,
       }),
     );
@@ -2093,11 +2168,15 @@ describe("meta lead ads webhook — anon page-id write path", () => {
     const retryContactId = randomUUID();
     const retryLeadId = randomUUID();
     await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
-      tx.contact.createMany({ data: [{ id: retryContactId, orgId: orgA.id, fullName: "Retry Attempt" }] }),
+      tx.contact.createMany({
+        data: [{ id: retryContactId, orgId: orgA.id, fullName: "Retry Attempt" }],
+      }),
     );
     await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
       tx.lead.createMany({
-        data: [{ id: retryLeadId, orgId: orgA.id, contactId: retryContactId, platformLeadId: leadgenId }],
+        data: [
+          { id: retryLeadId, orgId: orgA.id, contactId: retryContactId, platformLeadId: leadgenId },
+        ],
         skipDuplicates: true,
       }),
     );

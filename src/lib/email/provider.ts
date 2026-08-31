@@ -5,5 +5,9 @@
  * single import in src/lib/email.server.ts), not a rewrite.
  */
 export interface EmailProvider {
-  sendEmail(toAddress: string, subject: string, body: string): Promise<{ providerMessageId: string }>;
+  sendEmail(
+    toAddress: string,
+    subject: string,
+    body: string,
+  ): Promise<{ providerMessageId: string }>;
 }

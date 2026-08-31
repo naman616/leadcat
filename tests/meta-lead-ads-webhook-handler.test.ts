@@ -1,6 +1,9 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deterministicIdFor, handleMetaLeadsWebhook } from "../src/lib/meta-lead-ads/webhook-handler";
+import {
+  deterministicIdFor,
+  handleMetaLeadsWebhook,
+} from "../src/lib/meta-lead-ads/webhook-handler";
 
 const APP_SECRET = "test-app-secret";
 const VERIFY_TOKEN = "test-verify-token";

@@ -39,7 +39,10 @@ export const initiateClickToCall = createServerFn({ method: "POST" })
       }
       const toNumber = lead.contact.phone;
 
-      const { providerCallId } = await telephonyProvider.initiateCall(data.agentPhoneNumber, toNumber);
+      const { providerCallId } = await telephonyProvider.initiateCall(
+        data.agentPhoneNumber,
+        toNumber,
+      );
 
       const callLog = await tx.callLog.create({
         data: {
