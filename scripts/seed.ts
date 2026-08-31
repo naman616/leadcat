@@ -52,9 +52,21 @@ async function main() {
         project: { name: "Prestige Lakeview", type: "Residential" as const },
         towers: ["Tower A", "Tower B"],
         users: [
-          { email: "priya.owner@prestige-realty.seed", fullName: "Priya Sharma", role: "owner" as const },
-          { email: "rohit.admin@prestige-realty.seed", fullName: "Rohit Mehta", role: "admin" as const },
-          { email: "ananya.agent@prestige-realty.seed", fullName: "Ananya Iyer", role: "agent" as const },
+          {
+            email: "priya.owner@prestige-realty.seed",
+            fullName: "Priya Sharma",
+            role: "owner" as const,
+          },
+          {
+            email: "rohit.admin@prestige-realty.seed",
+            fullName: "Rohit Mehta",
+            role: "admin" as const,
+          },
+          {
+            email: "ananya.agent@prestige-realty.seed",
+            fullName: "Ananya Iyer",
+            role: "agent" as const,
+          },
         ],
         contacts: [
           { name: "Meera Joshi", phone: "+91 98200 11111" },
@@ -72,9 +84,21 @@ async function main() {
         project: { name: "Skyline Meadows", type: "Residential" as const },
         towers: ["Wing East", "Wing West"],
         users: [
-          { email: "karan.owner@skyline-properties.seed", fullName: "Karan Malhotra", role: "owner" as const },
-          { email: "vikram.admin@skyline-properties.seed", fullName: "Vikram Nair", role: "admin" as const },
-          { email: "fatima.agent@skyline-properties.seed", fullName: "Fatima Sheikh", role: "agent" as const },
+          {
+            email: "karan.owner@skyline-properties.seed",
+            fullName: "Karan Malhotra",
+            role: "owner" as const,
+          },
+          {
+            email: "vikram.admin@skyline-properties.seed",
+            fullName: "Vikram Nair",
+            role: "admin" as const,
+          },
+          {
+            email: "fatima.agent@skyline-properties.seed",
+            fullName: "Fatima Sheikh",
+            role: "agent" as const,
+          },
         ],
         contacts: [
           { name: "Ashwin Rao", phone: "+91 90300 11111" },
@@ -88,7 +112,14 @@ async function main() {
     ];
 
     // Six contacts/leads per org, one per LeadStatus — order matches contacts above.
-    const LEAD_STATUSES = ["New", "FollowUp", "Callback", "SiteVisit", "Booked", "Dropped"] as const;
+    const LEAD_STATUSES = [
+      "New",
+      "FollowUp",
+      "Callback",
+      "SiteVisit",
+      "Booked",
+      "Dropped",
+    ] as const;
     // Five units per org: a spread across every UnitStatus, plus one extra
     // Available unit with no tower (towerId is nullable — plotted/villa
     // projects may have none) to exercise that.
@@ -108,7 +139,10 @@ async function main() {
     // activities/assignments/projects/towers/units/org_members; auth.users
     // delete cascades public.users (and any leftover org_members).
     await prisma.organization.deleteMany({ where: { slug: { in: seedSlugs } } });
-    await prisma.$executeRawUnsafe(`DELETE FROM auth.users WHERE email = ANY($1::text[])`, seedEmails);
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM auth.users WHERE email = ANY($1::text[])`,
+      seedEmails,
+    );
 
     for (const orgDef of orgDefs) {
       const orgId = randomUUID();
@@ -126,7 +160,9 @@ async function main() {
         users.map((u) => JSON.stringify({ full_name: u.fullName })),
       );
 
-      await prisma.organization.create({ data: { id: orgId, name: orgDef.name, slug: orgDef.slug } });
+      await prisma.organization.create({
+        data: { id: orgId, name: orgDef.name, slug: orgDef.slug },
+      });
 
       await prisma.orgMember.createMany({
         data: users.map((u) => ({ orgId, userId: u.id, role: u.role })),

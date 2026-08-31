@@ -100,3 +100,36 @@ export async function withAnonFormContext<T>(
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   );
 }
+
+/**
+ * Same idea, for the Meta Lead Ads webhook's anon write path (issue #24).
+ * Sets a "request.meta_page_id" GUC — exactly parallel to
+ * withAnonFormContext's "request.form_token" — which
+ * app.org_id_for_meta_page() (added in
+ * prisma/migrations/20260826000000_meta_lead_ads_webhook) reads to decide
+ * which org's contacts/leads, if any, this Page ID may INSERT into.
+ *
+ * Unlike withAnonFormContext, pageId is NOT itself a secret — the caller
+ * (src/lib/meta-lead-ads/webhook-handler.ts) only calls this after
+ * verifying Meta's HMAC signature over the whole request, which is what
+ * actually proves the request (and its page_id) is genuine. See
+ * docs/specs/07-meta-lead-ads-webhook.md.
+ */
+export async function withAnonMetaWebhookContext<T>(
+  pageId: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+      // pageId is Meta's own external Page ID (not a UUID, so no UUID_RE
+      // check applies here the way it does for formToken/userId above) —
+      // still escape single quotes defensively before string-interpolating
+      // into raw SQL (SET LOCAL doesn't support bind parameters).
+      const escaped = pageId.replace(/'/g, "''");
+      await tx.$executeRawUnsafe(`SET LOCAL "request.meta_page_id" TO '${escaped}'`);
+      return fn(tx);
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  );
+}

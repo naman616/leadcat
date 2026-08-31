@@ -53,6 +53,7 @@ model Organization {
   callLogs         CallLog[]
   whatsappTemplates WhatsAppTemplate[]
   whatsappMessages  WhatsAppMessage[]
+  orgMetaCredential OrgMetaCredential?
 
   @@map("organizations")
 }
@@ -208,6 +209,7 @@ model Lead {
   callLogs     CallLog[]
   whatsappMessages WhatsAppMessage[]
 
+  @@unique([orgId, platformLeadId])
   @@map("leads")
 }
 
@@ -832,4 +834,21 @@ model WhatsAppMessage {
 
   @@index([orgId, leadId])
   @@map("whatsapp_messages")
+}
+
+/// Which Facebook Page maps to which org (issue #24), and that page's
+/// Graph API access token. Deliberately its own table, not columns on
+/// Organization: organizations' SELECT policy is member-readable, but a
+/// Page access token is a bearer credential for Meta's API — see
+/// docs/specs/07-meta-lead-ads-webhook.md.
+model OrgMetaCredential {
+  orgId               String   @id @map("org_id") @db.Uuid
+  metaPageId          String   @unique @map("meta_page_id")
+  metaPageAccessToken String   @map("meta_page_access_token")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("org_meta_credentials")
 }

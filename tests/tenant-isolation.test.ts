@@ -69,6 +69,21 @@ async function asAnonWithFormToken<T>(formToken: string, fn: (tx: Tx) => Promise
   });
 }
 
+/**
+ * Same idea, for the Meta Lead Ads webhook's anon write path (issue #24).
+ * Sets a "request.meta_page_id" GUC, which app.org_id_for_meta_page()
+ * (prisma/migrations/20260826000000_meta_lead_ads_webhook) reads to
+ * resolve which org, if any, this Page ID authorizes an INSERT into.
+ * Mirrors withAnonMetaWebhookContext in src/lib/db.server.ts exactly.
+ */
+async function asAnonWithMetaPage<T>(pageId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+    await tx.$executeRawUnsafe(`SET LOCAL "request.meta_page_id" TO '${pageId}'`);
+    return fn(tx);
+  });
+}
+
 const run = randomUUID().slice(0, 8);
 
 const orgA = { id: randomUUID(), name: "Org A Realty", slug: `org-a-${run}` };
@@ -103,10 +118,34 @@ const leadForHandoff = {
 };
 
 // Inventory fixtures for the unit price history tests below.
-const projectA = { id: randomUUID(), orgId: orgA.id, name: "Project A", city: "Pune", type: "Residential" as const };
-const projectB = { id: randomUUID(), orgId: orgB.id, name: "Project B", city: "Pune", type: "Residential" as const };
-const unitA = { id: randomUUID(), orgId: orgA.id, projectId: projectA.id, unitNumber: "A-101", price: "50L" };
-const unitB = { id: randomUUID(), orgId: orgB.id, projectId: projectB.id, unitNumber: "B-101", price: "60L" };
+const projectA = {
+  id: randomUUID(),
+  orgId: orgA.id,
+  name: "Project A",
+  city: "Pune",
+  type: "Residential" as const,
+};
+const projectB = {
+  id: randomUUID(),
+  orgId: orgB.id,
+  name: "Project B",
+  city: "Pune",
+  type: "Residential" as const,
+};
+const unitA = {
+  id: randomUUID(),
+  orgId: orgA.id,
+  projectId: projectA.id,
+  unitNumber: "A-101",
+  price: "50L",
+};
+const unitB = {
+  id: randomUUID(),
+  orgId: orgB.id,
+  projectId: projectB.id,
+  unitNumber: "B-101",
+  price: "60L",
+};
 
 // Populated in beforeAll from the DB-generated defaults — not set on the
 // literals above, since publicFormToken is gen_random_uuid()-defaulted,
@@ -403,7 +442,6 @@ describe("org governance and lead-handoff regressions", () => {
   });
 });
 
-
 // Regression tests for issue #19 (project media metadata) — see
 // prisma/migrations/20260819010000_project_media and
 // docs/specs/02-inventory.md's "project_media" section. Mirrors the
@@ -568,7 +606,9 @@ describe("task isolation and permissions", () => {
 
     await expect(
       asUser(userB.id, (tx) =>
-        tx.task.create({ data: { orgId: orgA.id, title: "Cross-org insert", createdBy: userB.id } }),
+        tx.task.create({
+          data: { orgId: orgA.id, title: "Cross-org insert", createdBy: userB.id },
+        }),
       ),
     ).rejects.toThrow(/row-level security/);
   });
@@ -794,7 +834,9 @@ describe("ad hierarchy isolation", () => {
     const seenByA = await asUser(userA.id, (tx) => tx.adAccount.findMany());
     expect(seenByA.map((a) => a.id)).toContain(account.id);
 
-    const seenByB = await asUser(userB.id, (tx) => tx.adAccount.findUnique({ where: { id: account.id } }));
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.adAccount.findUnique({ where: { id: account.id } }),
+    );
     expect(seenByB).toBeNull();
   });
 
@@ -846,10 +888,20 @@ describe("ad hierarchy isolation", () => {
 
   it("org members can view ads, and an org admin can create/delete a leaf ad", async () => {
     const account = await prisma.adAccount.create({
-      data: { orgId: orgA.id, platform: "meta", externalAccountId: "act_ads", name: "Ads test account" },
+      data: {
+        orgId: orgA.id,
+        platform: "meta",
+        externalAccountId: "act_ads",
+        name: "Ads test account",
+      },
     });
     const campaign = await prisma.campaign.create({
-      data: { orgId: orgA.id, adAccountId: account.id, externalCampaignId: "camp_1", name: "Campaign" },
+      data: {
+        orgId: orgA.id,
+        adAccountId: account.id,
+        externalCampaignId: "camp_1",
+        name: "Campaign",
+      },
     });
     const adSet = await prisma.adSet.create({
       data: { orgId: orgA.id, campaignId: campaign.id, externalAdSetId: "adset_1", name: "Ad set" },
@@ -861,10 +913,14 @@ describe("ad hierarchy isolation", () => {
       }),
     );
 
-    const seenByAgent = await asUser(agentX.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    const seenByAgent = await asUser(agentX.id, (tx) =>
+      tx.ad.findUnique({ where: { id: createdAd.id } }),
+    );
     expect(seenByAgent?.id).toBe(createdAd.id);
 
-    const seenByB = await asUser(userB.id, (tx) => tx.ad.findUnique({ where: { id: createdAd.id } }));
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.ad.findUnique({ where: { id: createdAd.id } }),
+    );
     expect(seenByB).toBeNull();
 
     const nonAdminDelete = await asUser(agentX.id, (tx) =>
@@ -872,7 +928,9 @@ describe("ad hierarchy isolation", () => {
     );
     expect(nonAdminDelete.count).toBe(0);
 
-    const adminDelete = await asUser(userA2.id, (tx) => tx.ad.deleteMany({ where: { id: createdAd.id } }));
+    const adminDelete = await asUser(userA2.id, (tx) =>
+      tx.ad.deleteMany({ where: { id: createdAd.id } }),
+    );
     expect(adminDelete.count).toBe(1);
   });
 });
@@ -1290,12 +1348,16 @@ describe("booking flow isolation", () => {
   });
 
   it("a non-admin cannot delete a booking, even in their own org", async () => {
-    const result = await asUser(agentX.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    const result = await asUser(agentX.id, (tx) =>
+      tx.booking.deleteMany({ where: { id: bookingA.id } }),
+    );
     expect(result.count).toBe(0);
   });
 
   it("an org admin CAN delete a booking in their own org", async () => {
-    const result = await asUser(userA2.id, (tx) => tx.booking.deleteMany({ where: { id: bookingA.id } }));
+    const result = await asUser(userA2.id, (tx) =>
+      tx.booking.deleteMany({ where: { id: bookingA.id } }),
+    );
     expect(result.count).toBe(1);
   });
 
@@ -1415,7 +1477,9 @@ describe("sms/email logging isolation", () => {
     expect(emailSeenByB.every((e) => e.orgId === orgB.id)).toBe(true);
 
     const orgASms = await prisma.smsLog.findFirstOrThrow({ where: { orgId: orgA.id } });
-    const direct = await asUser(userB.id, (tx) => tx.smsLog.findUnique({ where: { id: orgASms.id } }));
+    const direct = await asUser(userB.id, (tx) =>
+      tx.smsLog.findUnique({ where: { id: orgASms.id } }),
+    );
     expect(direct).toBeNull();
   });
 
@@ -1440,7 +1504,12 @@ describe("sms/email logging isolation", () => {
     await expect(
       asUser(userB.id, (tx) =>
         tx.emailLog.create({
-          data: { orgId: orgA.id, toAddress: "x@example.com", subject: "x", body: "Cross-org attempt" },
+          data: {
+            orgId: orgA.id,
+            toAddress: "x@example.com",
+            subject: "x",
+            body: "Cross-org attempt",
+          },
         }),
       ),
     ).rejects.toThrow(/row-level security/);
@@ -1460,7 +1529,9 @@ describe("sms/email logging isolation", () => {
     );
     expect(smsUpdate.count).toBe(0);
 
-    const smsDelete = await asUser(userA2.id, (tx) => tx.smsLog.deleteMany({ where: { id: smsLog.id } }));
+    const smsDelete = await asUser(userA2.id, (tx) =>
+      tx.smsLog.deleteMany({ where: { id: smsLog.id } }),
+    );
     expect(smsDelete.count).toBe(0);
 
     const emailUpdate = await asUser(userA2.id, (tx) =>
@@ -1598,7 +1669,9 @@ describe("call log isolation and click-to-call atomicity", () => {
     expect(result.activity.type).toBe("call");
     expect(result.activity.body).toContain("mock-test-call");
 
-    const storedCallLog = await prisma.callLog.findUniqueOrThrow({ where: { id: result.callLog.id } });
+    const storedCallLog = await prisma.callLog.findUniqueOrThrow({
+      where: { id: result.callLog.id },
+    });
     const storedActivity = await prisma.leadActivity.findUniqueOrThrow({
       where: { id: result.activity.id },
     });
@@ -1704,7 +1777,9 @@ describe("whatsapp template and message isolation", () => {
     );
     expect(deleteResult.count).toBe(0);
 
-    const stillThere = await prisma.whatsAppTemplate.findUniqueOrThrow({ where: { id: template.id } });
+    const stillThere = await prisma.whatsAppTemplate.findUniqueOrThrow({
+      where: { id: template.id },
+    });
     expect(stillThere.body).toBe("Original body");
   });
 
@@ -1714,7 +1789,10 @@ describe("whatsapp template and message isolation", () => {
     });
 
     const updated = await asUser(userA2.id, (tx) =>
-      tx.whatsAppTemplate.update({ where: { id: template.id }, data: { body: "Updated by admin" } }),
+      tx.whatsAppTemplate.update({
+        where: { id: template.id },
+        data: { body: "Updated by admin" },
+      }),
     );
     expect(updated.body).toBe("Updated by admin");
 
@@ -1886,5 +1964,244 @@ describe("whatsapp template and message isolation", () => {
 
     const activityCountAfter = await prisma.leadActivity.count({ where: { leadId: leadA.id } });
     expect(activityCountAfter).toBe(activityCountBefore);
+  });
+});
+
+// Regression tests for 20260826000000_meta_lead_ads_webhook and
+// src/lib/meta-lead-ads.server.ts / webhook-handler.ts — issue #24.
+describe("org_meta_credentials — admin-only", () => {
+  const orgAMetaPageId = `meta-page-a-${run}`;
+
+  it("an org admin CAN create their org's meta credentials", async () => {
+    const created = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.create({
+        data: { orgId: orgA.id, metaPageId: orgAMetaPageId, metaPageAccessToken: "secret-token-a" },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT create meta credentials, even in their own org", async () => {
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.orgMetaCredential.create({
+          data: { orgId: orgA.id, metaPageId: `rejected-${run}`, metaPageAccessToken: "nope" },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a non-admin CANNOT read meta credentials, even in their own org", async () => {
+    const seen = await asUser(agentX.id, (tx) => tx.orgMetaCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+
+  it("an org admin can read their own org's meta credentials, not another org's", async () => {
+    await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.create({
+        data: {
+          orgId: orgB.id,
+          metaPageId: `meta-page-b-${run}`,
+          metaPageAccessToken: "secret-token-b",
+        },
+      }),
+    );
+
+    const seenByA = await asUser(userA.id, (tx) => tx.orgMetaCredential.findMany());
+    expect(seenByA.map((c) => c.orgId)).toEqual([orgA.id]);
+  });
+
+  it("an org admin CAN update and delete their org's meta credentials", async () => {
+    const updated = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.update({
+        where: { orgId: orgB.id },
+        data: { metaPageAccessToken: "rotated-token-b" },
+      }),
+    );
+    expect(updated.metaPageAccessToken).toBe("rotated-token-b");
+
+    const deleted = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgB.id } }),
+    );
+    expect(deleted.count).toBe(1);
+  });
+
+  it("a non-admin CANNOT update or delete meta credentials, even in their own org", async () => {
+    const updateResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { metaPageAccessToken: "hijacked" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const deleteResult = await asUser(agentX.id, (tx) =>
+      tx.orgMetaCredential.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleteResult.count).toBe(0);
+
+    const stillThere = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.findUniqueOrThrow({ where: { orgId: orgA.id } }),
+    );
+    expect(stillThere.metaPageId).toBe(orgAMetaPageId);
+  });
+
+  it("an org admin CANNOT write into another org's meta credentials", async () => {
+    // userB is admin (owner) of orgB only — proves app.is_org_admin(org_id)
+    // is scoped per-org, not "any admin anywhere," distinct from the
+    // same-org non-admin case tested just above.
+    const updateResult = await asUser(userB.id, (tx) =>
+      tx.orgMetaCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { metaPageAccessToken: "hijacked-cross-org" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+
+    const stillThere = await asUser(userA.id, (tx) =>
+      tx.orgMetaCredential.findUniqueOrThrow({ where: { orgId: orgA.id } }),
+    );
+    expect(stillThere.metaPageId).toBe(orgAMetaPageId);
+  });
+
+  it("anon has zero access to meta credentials", async () => {
+    const seen = await asAnon((tx) => tx.orgMetaCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("meta lead ads webhook — anon page-id write path", () => {
+  const orgAMetaPageId = `meta-page-a-${run}`;
+
+  // org_meta_credentials.org_id is a primary key — one row per org, so
+  // this can't create a second row alongside the "org_meta_credentials —
+  // admin-only" describe block above (which may or may not have run yet,
+  // depending on file order). upsert makes this block self-sufficient
+  // either way: idempotent whether that row already exists or not, so
+  // this block's tests don't depend on sibling-describe execution order.
+  // Seeded directly via the base prisma client (bypasses RLS), same as
+  // the outer file's beforeAll seeding orgA/contactA/leadA.
+  beforeAll(async () => {
+    await prisma.orgMetaCredential.upsert({
+      where: { orgId: orgA.id },
+      create: {
+        orgId: orgA.id,
+        metaPageId: orgAMetaPageId,
+        metaPageAccessToken: "webhook-test-token",
+      },
+      update: { metaPageId: orgAMetaPageId, metaPageAccessToken: "webhook-test-token" },
+    });
+  });
+
+  it("a valid page id can create a contact + lead in its own org", async () => {
+    const metaContactId = randomUUID();
+    const metaLeadId = randomUUID();
+
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({
+        data: [{ id: metaContactId, orgId: orgA.id, fullName: "Meta Lead", phone: "9999999999" }],
+      }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [
+          {
+            id: metaLeadId,
+            orgId: orgA.id,
+            contactId: metaContactId,
+            source: "Meta Lead Ads",
+            platformLeadId: `leadgen-${run}-1`,
+          },
+        ],
+      }),
+    );
+
+    const contact = await asUser(userA.id, (tx) =>
+      tx.contact.findUniqueOrThrow({ where: { id: metaContactId } }),
+    );
+    expect(contact.orgId).toBe(orgA.id);
+
+    const lead = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: metaLeadId } }),
+    );
+    expect(lead.orgId).toBe(orgA.id);
+    expect(lead.platformLeadId).toBe(`leadgen-${run}-1`);
+  });
+
+  it("an unknown page id creates nothing — rejected, not silently attributed anywhere", async () => {
+    await expect(
+      asAnonWithMetaPage(`unknown-page-${run}`, (tx) =>
+        tx.contact.create({ data: { orgId: orgA.id, fullName: "Should never exist" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("org A's page id can never create data attributed to org B", async () => {
+    await expect(
+      asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+        tx.contact.create({ data: { orgId: orgB.id, fullName: "Cross-org attempt" } }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a retried leadgen_id does not create a second lead (skipDuplicates)", async () => {
+    const firstContactId = randomUUID();
+    const firstLeadId = randomUUID();
+    const leadgenId = `leadgen-${run}-retry`;
+
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({
+        data: [{ id: firstContactId, orgId: orgA.id, fullName: "First Attempt" }],
+      }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [
+          { id: firstLeadId, orgId: orgA.id, contactId: firstContactId, platformLeadId: leadgenId },
+        ],
+        skipDuplicates: true,
+      }),
+    );
+
+    // Simulated retry: same leadgen_id, different generated row ids — a
+    // fresh webhook delivery wouldn't know the first attempt's ids.
+    const retryContactId = randomUUID();
+    const retryLeadId = randomUUID();
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.createMany({
+        data: [{ id: retryContactId, orgId: orgA.id, fullName: "Retry Attempt" }],
+      }),
+    );
+    await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.lead.createMany({
+        data: [
+          { id: retryLeadId, orgId: orgA.id, contactId: retryContactId, platformLeadId: leadgenId },
+        ],
+        skipDuplicates: true,
+      }),
+    );
+
+    const matchingLeads = await asUser(userA.id, (tx) =>
+      tx.lead.findMany({ where: { platformLeadId: leadgenId } }),
+    );
+    expect(matchingLeads).toHaveLength(1);
+    expect(matchingLeads[0]?.id).toBe(firstLeadId);
+  });
+
+  it("a valid page id grants INSERT only on contacts — never SELECT, UPDATE, or DELETE", async () => {
+    const seen = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.findMany({ where: { orgId: orgA.id } }),
+    );
+    expect(seen).toHaveLength(0);
+
+    const updated = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.updateMany({ where: { orgId: orgA.id }, data: { fullName: "Hijacked" } }),
+    );
+    expect(updated.count).toBe(0);
+
+    const deleted = await asAnonWithMetaPage(orgAMetaPageId, (tx) =>
+      tx.contact.deleteMany({ where: { orgId: orgA.id } }),
+    );
+    expect(deleted.count).toBe(0);
   });
 });
