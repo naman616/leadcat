@@ -133,3 +133,34 @@ export async function withAnonMetaWebhookContext<T>(
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   );
 }
+
+/**
+ * Same idea, for the WhatsApp inbound webhook's anon write path (see
+ * docs/specs/08-whatsapp-inbound-webhook.md). Sets two GUCs —
+ * "request.whatsapp_phone_number_id" and "request.whatsapp_from_number" —
+ * which app.record_inbound_whatsapp_message() (added in
+ * prisma/migrations/20260904000000_whatsapp_inbound_webhook) reads to
+ * resolve org + find-or-create the Lead. Like pageId in
+ * withAnonMetaWebhookContext, neither value needs to be a secret: the
+ * webhook handler only calls this after verifying the request's HMAC
+ * signature, which is what actually proves both values are genuine.
+ */
+export async function withAnonWhatsAppWebhookContext<T>(
+  phoneNumberId: string,
+  fromNumber: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+      const escapedPhoneNumberId = phoneNumberId.replace(/'/g, "''");
+      const escapedFromNumber = fromNumber.replace(/'/g, "''");
+      await tx.$executeRawUnsafe(
+        `SET LOCAL "request.whatsapp_phone_number_id" TO '${escapedPhoneNumberId}'`,
+      );
+      await tx.$executeRawUnsafe(`SET LOCAL "request.whatsapp_from_number" TO '${escapedFromNumber}'`);
+      return fn(tx);
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  );
+}

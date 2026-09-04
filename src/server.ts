@@ -3,6 +3,7 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleMetaLeadsWebhook } from "./lib/meta-lead-ads/webhook-handler";
+import { handleWhatsAppWebhook } from "./lib/whatsapp/webhook-handler";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -51,6 +52,9 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === "/api/webhooks/meta-leads") {
         return await handleMetaLeadsWebhook(request);
+      }
+      if (url.pathname === "/api/webhooks/whatsapp") {
+        return await handleWhatsAppWebhook(request);
       }
 
       const handler = await getServerEntry();
