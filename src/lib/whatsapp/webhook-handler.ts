@@ -62,8 +62,11 @@ async function processMessagesChange(value: WhatsAppMessagesChangeValue): Promis
 
     try {
       const capturedAt = new Date(Number(message.timestamp) * 1000);
-      await withAnonWhatsAppWebhookContext(phoneNumberId, message.from, (tx) =>
-        tx.$queryRaw<{ lead_id: string | null }[]>`
+      await withAnonWhatsAppWebhookContext(
+        phoneNumberId,
+        message.from,
+        (tx) =>
+          tx.$queryRaw<{ lead_id: string | null }[]>`
           SELECT app.record_inbound_whatsapp_message(
             ${contactName ?? message.from}, ${message.id}, ${message.text!.body}, ${capturedAt}
           ) AS lead_id

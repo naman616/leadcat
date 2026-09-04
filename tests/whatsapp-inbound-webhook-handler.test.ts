@@ -140,7 +140,12 @@ describe("handleWhatsAppWebhook", () => {
                 metadata: { phone_number_id: "unattributed-phone-id" },
                 contacts: [{ profile: { name: "Someone" } }],
                 messages: [
-                  { id: "wamid.image", from: "919999999999", timestamp: "1690000000", type: "image" },
+                  {
+                    id: "wamid.image",
+                    from: "919999999999",
+                    timestamp: "1690000000",
+                    type: "image",
+                  },
                 ],
               },
             },

@@ -158,7 +158,9 @@ export async function withAnonWhatsAppWebhookContext<T>(
       await tx.$executeRawUnsafe(
         `SET LOCAL "request.whatsapp_phone_number_id" TO '${escapedPhoneNumberId}'`,
       );
-      await tx.$executeRawUnsafe(`SET LOCAL "request.whatsapp_from_number" TO '${escapedFromNumber}'`);
+      await tx.$executeRawUnsafe(
+        `SET LOCAL "request.whatsapp_from_number" TO '${escapedFromNumber}'`,
+      );
       return fn(tx);
     },
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
