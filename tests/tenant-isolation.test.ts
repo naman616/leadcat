@@ -90,7 +90,9 @@ async function asAnonWithMetaPage<T>(pageId: string, fn: (tx: Tx) => Promise<T>)
  * "request.whatsapp_phone_number_id" and "request.whatsapp_from_number"
  * GUCs, which app.record_inbound_whatsapp_message()
  * (prisma/migrations/20260904000000_whatsapp_inbound_webhook) reads.
- * Mirrors withAnonWhatsAppWebhookContext in src/lib/db.server.ts exactly.
+ * Mirrors the shape of withAnonWhatsAppWebhookContext in
+ * src/lib/db.server.ts (without the production wrapper's quote-escaping,
+ * unnecessary for this test's controlled inputs).
  */
 async function asAnonWithWhatsAppNumber<T>(
   phoneNumberId: string,
@@ -99,7 +101,9 @@ async function asAnonWithWhatsAppNumber<T>(
 ): Promise<T> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
-    await tx.$executeRawUnsafe(`SET LOCAL "request.whatsapp_phone_number_id" TO '${phoneNumberId}'`);
+    await tx.$executeRawUnsafe(
+      `SET LOCAL "request.whatsapp_phone_number_id" TO '${phoneNumberId}'`,
+    );
     await tx.$executeRawUnsafe(`SET LOCAL "request.whatsapp_from_number" TO '${fromNumber}'`);
     return fn(tx);
   });
@@ -111,8 +115,11 @@ async function recordInboundWhatsAppMessage(
   fromNumber: string,
   args: { contactName: string; providerMessageId: string; body: string; capturedAt: Date },
 ): Promise<string | null> {
-  const [row] = await asAnonWithWhatsAppNumber(phoneNumberId, fromNumber, (tx) =>
-    tx.$queryRaw<{ lead_id: string | null }[]>`
+  const [row] = await asAnonWithWhatsAppNumber(
+    phoneNumberId,
+    fromNumber,
+    (tx) =>
+      tx.$queryRaw<{ lead_id: string | null }[]>`
       SELECT app.record_inbound_whatsapp_message(
         ${args.contactName}, ${args.providerMessageId}, ${args.body}, ${args.capturedAt}
       ) AS lead_id
@@ -2309,7 +2316,10 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
         whatsappPhoneNumberId: orgAPhoneNumberId,
         whatsappAccessToken: "webhook-test-token-a",
       },
-      update: { whatsappPhoneNumberId: orgAPhoneNumberId, whatsappAccessToken: "webhook-test-token-a" },
+      update: {
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-a",
+      },
     });
     await prisma.orgWhatsAppCredential.upsert({
       where: { orgId: orgB.id },
@@ -2318,7 +2328,10 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
         whatsappPhoneNumberId: orgBPhoneNumberId,
         whatsappAccessToken: "webhook-test-token-b",
       },
-      update: { whatsappPhoneNumberId: orgBPhoneNumberId, whatsappAccessToken: "webhook-test-token-b" },
+      update: {
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-b",
+      },
     });
   });
 
@@ -2342,7 +2355,9 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
     });
     expect(leadId).not.toBeNull();
 
-    const lead = await asUser(userA.id, (tx) => tx.lead.findUniqueOrThrow({ where: { id: leadId! } }));
+    const lead = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: leadId! } }),
+    );
     expect(lead.orgId).toBe(orgA.id);
     expect(lead.source).toBe("WhatsApp");
     expect(lead.subSource).toBe(orgAPhoneNumberId);
