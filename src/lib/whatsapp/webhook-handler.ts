@@ -11,7 +11,7 @@ interface WhatsAppInboundMessage {
 
 interface WhatsAppMessagesChangeValue {
   metadata: { phone_number_id: string };
-  contacts?: Array<{ profile?: { name?: string } }>;
+  contacts?: Array<{ wa_id?: string; profile?: { name?: string } }>;
   messages?: WhatsAppInboundMessage[];
 }
 
@@ -52,7 +52,6 @@ function handleVerificationRequest(url: URL): Response {
  */
 async function processMessagesChange(value: WhatsAppMessagesChangeValue): Promise<void> {
   const phoneNumberId = value.metadata.phone_number_id;
-  const contactName = value.contacts?.[0]?.profile?.name;
 
   for (const message of value.messages ?? []) {
     if (message.type !== "text" || !message.text) {
@@ -61,17 +60,27 @@ async function processMessagesChange(value: WhatsAppMessagesChangeValue): Promis
     }
 
     try {
-      const capturedAt = new Date(Number(message.timestamp) * 1000);
-      await withAnonWhatsAppWebhookContext(
+      // Match the contacts[] entry by wa_id, not index 0 — a batch can
+      // carry messages from multiple senders, and contacts[0] would stamp
+      // the first sender's name onto every new Contact in the batch.
+      const contactName = value.contacts?.find((c) => c.wa_id === message.from)?.profile?.name;
+      const timestampMs = Number(message.timestamp) * 1000;
+      const capturedAt = Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date();
+      const [row] = await withAnonWhatsAppWebhookContext(
         phoneNumberId,
         message.from,
         (tx) =>
           tx.$queryRaw<{ lead_id: string | null }[]>`
           SELECT app.record_inbound_whatsapp_message(
-            ${contactName ?? message.from}, ${message.id}, ${message.text!.body}, ${capturedAt}
+            ${contactName || message.from}, ${message.id}, ${message.text!.body}, ${capturedAt}
           ) AS lead_id
         `,
       );
+      if (!row?.lead_id) {
+        console.error(
+          `[whatsapp webhook] unattributable phone_number_id: ${phoneNumberId} (message ${message.id})`,
+        );
+      }
     } catch (error) {
       console.error(`[whatsapp webhook] failed to process message ${message.id}:`, error);
     }
@@ -103,7 +112,16 @@ async function handleMessageNotification(request: Request): Promise<Response> {
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
       if (change.field !== "messages" || !isMessagesChangeValue(change.value)) continue;
-      await processMessagesChange(change.value);
+      try {
+        await processMessagesChange(change.value);
+      } catch (error) {
+        // isMessagesChangeValue only validates metadata.phone_number_id, not
+        // messages — a structurally malformed messages[] (e.g. not an array)
+        // would otherwise throw here and propagate to a 500, violating the
+        // "always 200 once signature-verified" rule. Same pattern as the
+        // Meta webhook's entry-loop catch around processLeadgenChange.
+        console.error(`[whatsapp webhook] failed to process messages change:`, error);
+      }
     }
   }
 

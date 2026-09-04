@@ -163,6 +163,57 @@ describe("handleWhatsAppWebhook", () => {
     expect(response.status).toBe(200);
   });
 
+  it("a non-text message doesn't block a sibling text message in the same delivery", async () => {
+    const body = JSON.stringify({
+      entry: [
+        {
+          id: "some-waba",
+          changes: [
+            {
+              field: "messages",
+              value: {
+                metadata: { phone_number_id: "unattributed-phone-id" },
+                contacts: [
+                  { wa_id: "919999999999", profile: { name: "Someone" } },
+                  { wa_id: "918888888888", profile: { name: "Someone Else" } },
+                ],
+                messages: [
+                  {
+                    id: "wamid.image",
+                    from: "919999999999",
+                    timestamp: "1690000000",
+                    type: "image",
+                  },
+                  {
+                    id: "wamid.text",
+                    from: "918888888888",
+                    timestamp: "1690000000",
+                    type: "text",
+                    text: { body: "hello" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await handleWhatsAppWebhook(
+      new Request("http://localhost/api/webhooks/whatsapp", {
+        method: "POST",
+        headers: { "x-hub-signature-256": sign(body) },
+        body,
+      }),
+    );
+    // "unattributed-phone-id" has no matching org, so the text message
+    // resolves to no attribution (same as the file's other
+    // unattributed-phone-id cases) — this proves the non-text sibling
+    // didn't block it from being routed/processed at all, without needing
+    // TEST_DATABASE_URL.
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("EVENT_RECEIVED");
+  });
+
   it("unsupported methods return 405", async () => {
     const response = await handleWhatsAppWebhook(
       new Request("http://localhost/api/webhooks/whatsapp", { method: "DELETE" }),
