@@ -65,3 +65,18 @@ export function parseCsv(text: string): string[][] {
 
   return rows.filter((r) => !(r.length === 1 && r[0] === ""));
 }
+
+/**
+ * Inverse of parseCsv above: turns rows of plain values into CSV text. A
+ * field is only quoted when it actually needs it (contains a comma, quote,
+ * or newline), with embedded quotes doubled — the same shape parseCsv (and
+ * Excel/Sheets) round-trip correctly. \r\n line endings to match
+ * LEAD_IMPORT_TEMPLATE_CSV.
+ */
+export function stringifyCsv(rows: (string | number | null | undefined)[][]): string {
+  const escapeField = (value: string | number | null | undefined): string => {
+    const s = value === null || value === undefined ? "" : String(value);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return rows.map((row) => row.map(escapeField).join(",")).join("\r\n") + "\r\n";
+}
