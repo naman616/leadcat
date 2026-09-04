@@ -43,6 +43,50 @@ export const listTemplates = createServerFn({ method: "GET" }).handler(async () 
   );
 });
 
+const setWhatsAppPhoneCredentialsSchema = z.object({
+  whatsappPhoneNumberId: z.string().min(1),
+  whatsappAccessToken: z.string().min(1),
+});
+
+/**
+ * Admin-only — RLS gates this via org_whatsapp_credentials' write policies
+ * (app.is_org_admin), same shape as setMetaPageCredentials
+ * (src/lib/meta-lead-ads.server.ts). No app-level role check needed; a
+ * non-admin's upsert is simply rejected by Postgres. No UI yet — callable
+ * directly until an admin settings screen exists.
+ *
+ * ponytail: no phone-number ownership verification. whatsappPhoneNumberId
+ * is globally unique and first-come-first-served — nothing here checks the
+ * calling org actually controls the WhatsApp Business number being
+ * registered, so an org admin could register another org's real number
+ * first and misattribute their real inbound messages. Same accepted-gap
+ * shape as setMetaPageCredentials; see docs/specs/08-whatsapp-inbound-webhook.md
+ * ("Known limitation") — this must not be enabled for more than one org on
+ * a shared deployment until a real WhatsApp Cloud API ownership check
+ * exists.
+ */
+export const setWhatsAppPhoneCredentials = createServerFn({ method: "POST" })
+  .validator(setWhatsAppPhoneCredentialsSchema)
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+    const orgId = await requirePrimaryOrgId(userId);
+
+    return withUserContext(userId, (tx) =>
+      tx.orgWhatsAppCredential.upsert({
+        where: { orgId },
+        create: {
+          orgId,
+          whatsappPhoneNumberId: data.whatsappPhoneNumberId,
+          whatsappAccessToken: data.whatsappAccessToken,
+        },
+        update: {
+          whatsappPhoneNumberId: data.whatsappPhoneNumberId,
+          whatsappAccessToken: data.whatsappAccessToken,
+        },
+      }),
+    );
+  });
+
 const sendWhatsAppMessageSchema = z.object({
   leadId: z.string().uuid().optional(),
   toNumber: z.string().min(1),
