@@ -975,9 +975,12 @@ function LeadPreview({
 
   const callMutation = useMutation({
     mutationFn: initiateClickToCall,
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
-      localStorage.setItem("leadcat:agentPhoneNumber", agentPhoneNumber);
+      // Persist the number actually used for this call (from the mutation's
+      // own variables), not whatever the input holds by the time this runs —
+      // the user could have edited it while the call was in flight.
+      localStorage.setItem("leadcat:agentPhoneNumber", variables.data.agentPhoneNumber);
       setCallOpen(false);
       toast.success("Call initiated");
     },
@@ -1306,6 +1309,7 @@ function LeadPreview({
               value={agentPhoneNumber}
               onChange={(e) => setAgentPhoneNumber(e.target.value)}
               placeholder="9876543210"
+              disabled={callMutation.isPending}
             />
           </div>
           <DialogFooter>
@@ -1316,7 +1320,7 @@ function LeadPreview({
                   data: { leadId: lead.id, agentPhoneNumber: agentPhoneNumber.trim() },
                 });
               }}
-              disabled={callMutation.isPending || !agentPhoneNumber.trim()}
+              disabled={callMutation.isPending || !agentPhoneNumber.trim() || !lead}
             >
               {callMutation.isPending ? "Calling..." : "Call"}
             </Button>
