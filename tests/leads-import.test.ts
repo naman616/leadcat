@@ -45,7 +45,7 @@ describe("stringifyCsv", () => {
   });
 
   it("quotes a field containing a comma, quote, or newline", () => {
-    expect(stringifyCsv([["Rao, likes \"2BHK\""]])).toBe('"Rao, likes ""2BHK"""\r\n');
+    expect(stringifyCsv([['Rao, likes "2BHK"']])).toBe('"Rao, likes ""2BHK"""\r\n');
     expect(stringifyCsv([["line1\nline2"]])).toBe('"line1\nline2"\r\n');
   });
 
