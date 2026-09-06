@@ -4,9 +4,36 @@ import type { Prisma } from "@prisma/client";
 import { withUserContext, type Tx } from "./db.server";
 import { requireUserId, requirePrimaryOrgId } from "./current-user.server";
 import { LEAD_STATUS_VALUES } from "./lead-status";
+import { stringifyCsv } from "./csv";
 
 const assigneeSelect = { id: true, fullName: true, email: true } as const;
 const contactSelect = { id: true, fullName: true, phone: true, email: true, city: true } as const;
+
+// Shared by listLeads and exportLeadsCsv (issue #42) so the CSV export
+// filters exactly the same rows the list view would show — one where-clause,
+// not two copies that could drift.
+const leadFilterSchema = z.object({
+  status: z.enum(LEAD_STATUS_VALUES).optional(),
+  assignedTo: z.string().uuid().optional(),
+  search: z.string().optional(),
+});
+
+function buildLeadWhere(data?: z.infer<typeof leadFilterSchema>): Prisma.LeadWhereInput {
+  return {
+    ...(data?.status ? { status: data.status } : {}),
+    ...(data?.assignedTo ? { assignedTo: data.assignedTo } : {}),
+    ...(data?.search
+      ? {
+          OR: [
+            { contact: { fullName: { contains: data.search, mode: "insensitive" } } },
+            { contact: { phone: { contains: data.search } } },
+            { project: { contains: data.search, mode: "insensitive" } },
+            { source: { contains: data.search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+}
 
 /**
  * assignedTo is only FK-constrained to users(id) — any user in the system,
@@ -23,32 +50,10 @@ export async function requireOrgMember(tx: Tx, orgId: string, targetUserId: stri
 }
 
 export const listLeads = createServerFn({ method: "GET" })
-  .validator(
-    z
-      .object({
-        status: z.enum(LEAD_STATUS_VALUES).optional(),
-        assignedTo: z.string().uuid().optional(),
-        search: z.string().optional(),
-      })
-      .optional(),
-  )
+  .validator(leadFilterSchema.optional())
   .handler(async ({ data }) => {
     const userId = await requireUserId();
-
-    const where: Prisma.LeadWhereInput = {
-      ...(data?.status ? { status: data.status } : {}),
-      ...(data?.assignedTo ? { assignedTo: data.assignedTo } : {}),
-      ...(data?.search
-        ? {
-            OR: [
-              { contact: { fullName: { contains: data.search, mode: "insensitive" } } },
-              { contact: { phone: { contains: data.search } } },
-              { project: { contains: data.search, mode: "insensitive" } },
-              { source: { contains: data.search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
-    };
+    const where = buildLeadWhere(data);
 
     return withUserContext(userId, (tx) =>
       tx.lead.findMany({
@@ -57,6 +62,62 @@ export const listLeads = createServerFn({ method: "GET" })
         orderBy: { createdAt: "desc" },
       }),
     );
+  });
+
+const LEAD_EXPORT_HEADER = [
+  "Full Name",
+  "Phone",
+  "Email",
+  "City",
+  "Status",
+  "Sub Status",
+  "Source",
+  "Sub Source",
+  "Project",
+  "Budget",
+  "Requirement",
+  "Assigned To",
+  "Created At",
+];
+
+/**
+ * CSV export of the leads list (issue #42, scoped to leads since that's the
+ * only mature, already-queryable report-shaped dataset today — the 12 fixed
+ * reports in issue #39 are still unbuilt). Takes the exact same filter shape
+ * as listLeads and runs the same where-clause through withUserContext, so
+ * the export is RLS-scoped to the caller's org exactly like the list view.
+ */
+export const exportLeadsCsv = createServerFn({ method: "GET" })
+  .validator(leadFilterSchema.optional())
+  .handler(async ({ data }) => {
+    const userId = await requireUserId();
+    const where = buildLeadWhere(data);
+
+    const leads = await withUserContext(userId, (tx) =>
+      tx.lead.findMany({
+        where,
+        include: { contact: { select: contactSelect }, assignee: { select: assigneeSelect } },
+        orderBy: { createdAt: "desc" },
+      }),
+    );
+
+    const rows = leads.map((l) => [
+      l.contact.fullName,
+      l.contact.phone,
+      l.contact.email,
+      l.contact.city,
+      l.status,
+      l.subStatus,
+      l.source,
+      l.subSource,
+      l.project,
+      l.budget,
+      l.requirement,
+      l.assignee?.fullName ?? "",
+      l.createdAt.toISOString(),
+    ]);
+
+    return stringifyCsv([LEAD_EXPORT_HEADER, ...rows]);
   });
 
 export const getLead = createServerFn({ method: "GET" })

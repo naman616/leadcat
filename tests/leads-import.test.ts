@@ -1,7 +1,7 @@
 // Pure-function tests for the bulk lead upload parser (no DB — unlike
 // tenant-isolation.test.ts, these run without TEST_DATABASE_URL).
 import { describe, expect, it } from "vitest";
-import { parseCsv } from "../src/lib/csv";
+import { parseCsv, stringifyCsv } from "../src/lib/csv";
 import { LEAD_IMPORT_TEMPLATE_CSV, parseLeadImportCsv } from "../src/lib/leads-import";
 
 describe("parseCsv", () => {
@@ -31,6 +31,38 @@ describe("parseCsv", () => {
       ["a", "b"],
       ["1", "2"],
     ]);
+  });
+});
+
+describe("stringifyCsv", () => {
+  it("joins plain rows with \\r\\n line endings", () => {
+    expect(
+      stringifyCsv([
+        ["a", "b", "c"],
+        ["1", "2", "3"],
+      ]),
+    ).toBe("a,b,c\r\n1,2,3\r\n");
+  });
+
+  it("quotes a field containing a comma, quote, or newline", () => {
+    expect(stringifyCsv([['Rao, likes "2BHK"']])).toBe('"Rao, likes ""2BHK"""\r\n');
+    expect(stringifyCsv([["line1\nline2"]])).toBe('"line1\nline2"\r\n');
+  });
+
+  it("does not quote fields that don't need it", () => {
+    expect(stringifyCsv([["Asha Rao", "Pune"]])).toBe("Asha Rao,Pune\r\n");
+  });
+
+  it("renders null/undefined as an empty field", () => {
+    expect(stringifyCsv([["Asha", null, undefined]])).toBe("Asha,,\r\n");
+  });
+
+  it("round-trips through parseCsv", () => {
+    const rows = [
+      ["Full Name", "Note"],
+      ["Asha", 'Likes "2BHK", quiet street'],
+    ];
+    expect(parseCsv(stringifyCsv(rows))).toEqual(rows);
   });
 });
 

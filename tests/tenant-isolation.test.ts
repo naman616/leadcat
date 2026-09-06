@@ -2205,3 +2205,56 @@ describe("meta lead ads webhook — anon page-id write path", () => {
     expect(deleted.count).toBe(0);
   });
 });
+
+// Regression tests for issue #42 (CSV export) — src/lib/leads.server.ts's
+// exportLeadsCsv. Same precedent as the unit-price-history/booking-flow
+// blocks above: requireUserId() needs a real request context this test file
+// doesn't have, so this replicates exportLeadsCsv's exact tx body — the same
+// where-clause buildLeadWhere/listLeads uses, run through withUserContext —
+// via the asUser helper rather than calling the server function directly.
+// CSV string formatting itself (stringifyCsv) is covered by pure-function
+// tests in tests/leads-import.test.ts; what matters here is that the rows
+// feeding into it never cross an org boundary.
+describe("leads CSV export isolation", () => {
+  it("only returns the caller's own org's leads, never another org's", async () => {
+    const seenByA = await asUser(userA.id, (tx) =>
+      tx.lead.findMany({
+        where: {},
+        include: { contact: true, assignee: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    );
+    expect(seenByA.every((l) => l.orgId === orgA.id)).toBe(true);
+    expect(seenByA.map((l) => l.id)).not.toContain(leadB.id);
+
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.lead.findMany({
+        where: {},
+        include: { contact: true, assignee: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    );
+    expect(seenByB.every((l) => l.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((l) => l.id)).toContain(leadB.id);
+  });
+
+  it("an unauthenticated (anon) export attempt gets zero rows, not an error", async () => {
+    const seen = await asAnon((tx) => tx.lead.findMany({ where: {} }));
+    expect(seen).toHaveLength(0);
+  });
+
+  it("filters (e.g. assignedTo) apply on top of the org scoping, same as listLeads", async () => {
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.lead.findMany({ where: { assignedTo: userB.id } }),
+    );
+    expect(seenByB.map((l) => l.id)).toContain(leadB.id);
+    expect(seenByB.every((l) => l.orgId === orgB.id)).toBe(true);
+
+    // userA.id isn't a member of orgB, let alone assigned any orgB lead —
+    // this should be an org-scoped zero rows, never orgA's own leadA.
+    const seenByBWrongAssignee = await asUser(userB.id, (tx) =>
+      tx.lead.findMany({ where: { assignedTo: userA.id } }),
+    );
+    expect(seenByBWrongAssignee).toHaveLength(0);
+  });
+});
