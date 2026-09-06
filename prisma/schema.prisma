@@ -43,6 +43,7 @@ model Organization {
   campaigns        Campaign[]
   adSets           AdSet[]
   ads              Ad[]
+  adDailyStats     AdDailyStat[]
   channelPartners   ChannelPartner[]
   bookings          Booking[]
   costSheets        CostSheet[]
@@ -513,10 +514,41 @@ model Ad {
   name        String
   createdAt   DateTime @default(now()) @map("created_at")
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  adSet        AdSet        @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  adSet        AdSet         @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+  dailyStats   AdDailyStat[]
 
   @@map("ads")
+}
+
+/// Phase 3.5 (issues #27-29): one row per (ad, day) of spend/impressions/
+/// clicks, synced from the real Meta Marketing / Google Ads APIs — behind
+/// the same AdSpendProvider seam MockTelephonyProvider/MockWhatsAppProvider
+/// already use, since no real vendor credentials exist yet (see
+/// docs/specs/10-ad-spend-sync.md). `date` + `@@unique([adId, date])` is
+/// the whole "rolling re-sync" mechanism: syncAdSpend re-fetches the
+/// trailing 28 days every run and upserts on that key, because ad
+/// platforms revise a day's own attributed numbers for days after it ends
+/// — re-running is expected to change already-synced rows, not just add
+/// new ones. `spend` is Decimal (this slice does arithmetic on it — cost
+/// per lead/booking, issue #40), same reasoning as CostSheet/
+/// PaymentMilestone rather than Unit.price's free-text String style.
+model AdDailyStat {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  adId        String   @map("ad_id") @db.Uuid
+  date        DateTime @db.Date
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  spend       Decimal  @default(0) @db.Decimal(14, 2)
+  syncedAt    DateTime @default(now()) @updatedAt @map("synced_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  ad           Ad           @relation(fields: [adId], references: [id], onDelete: Cascade)
+
+  @@unique([adId, date])
+  @@index([orgId, adId])
+  @@map("ad_daily_stats")
 }
 
 // ============================================================================
