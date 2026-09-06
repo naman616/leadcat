@@ -159,14 +159,22 @@ function AdAccountsPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Sync failed"),
   });
 
-  const totals = (statsQuery.data ?? []).reduce(
-    (acc, s) => ({
-      impressions: acc.impressions + s.impressions,
-      clicks: acc.clicks + s.clicks,
-      spend: acc.spend + Number(s.spend),
-    }),
-    { impressions: 0, clicks: 0, spend: 0 },
-  );
+  // listAdDailyStats returns an account's full history, not just the
+  // trailing window — rows older than 28 days aren't deleted, only no
+  // longer re-synced. Filter to what the "trailing 28 days" label actually
+  // claims rather than summing everything the query happens to return.
+  const trailingWindowStart = new Date();
+  trailingWindowStart.setDate(trailingWindowStart.getDate() - 27);
+  const totals = (statsQuery.data ?? [])
+    .filter((s) => new Date(s.date) >= trailingWindowStart)
+    .reduce(
+      (acc, s) => ({
+        impressions: acc.impressions + s.impressions,
+        clicks: acc.clicks + s.clicks,
+        spend: acc.spend + Number(s.spend),
+      }),
+      { impressions: 0, clicks: 0, spend: 0 },
+    );
 
   return (
     <AppShell

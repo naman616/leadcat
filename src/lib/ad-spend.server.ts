@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { withUserContext } from "./db.server";
 import { requireUserId } from "./current-user.server";
@@ -63,33 +64,51 @@ export const syncAdSpend = createServerFn({ method: "POST" })
         else adIdsByExternalId.set(ad.externalAdId, [ad.id]);
       }
 
-      let syncedDays = 0;
+      const rows: {
+        adId: string;
+        date: string;
+        impressions: number;
+        clicks: number;
+        spend: string;
+      }[] = [];
       for (const point of points) {
         const adIds = adIdsByExternalId.get(point.externalAdId);
         if (!adIds) continue; // a stat for an ad we don't know about — skip, don't fail the whole sync
-
         for (const adId of adIds) {
-          await tx.adDailyStat.upsert({
-            where: { adId_date: { adId, date: new Date(point.date) } },
-            create: {
-              orgId: adAccount.orgId,
-              adId,
-              date: new Date(point.date),
-              impressions: point.impressions,
-              clicks: point.clicks,
-              spend: point.spend,
-            },
-            update: {
-              impressions: point.impressions,
-              clicks: point.clicks,
-              spend: point.spend,
-            },
+          rows.push({
+            adId,
+            date: point.date,
+            impressions: point.impressions,
+            clicks: point.clicks,
+            spend: point.spend,
           });
-          syncedDays++;
         }
       }
+      if (rows.length === 0) return { syncedAds: ads.length, syncedDays: 0 };
 
-      return { syncedAds: ads.length, syncedDays };
+      // One bulk upsert, not one round trip per (ad, day) — a 20+ ad
+      // account over a 28-day window is hundreds of sequential awaits
+      // inside a single interactive transaction otherwise, risking
+      // db.server.ts's TRANSACTION_TIMEOUT_MS on a real (non-local)
+      // connection. Well under Postgres's per-statement parameter limit at
+      // this app's realistic ad-account sizes.
+      const values = Prisma.join(
+        rows.map(
+          (r) =>
+            Prisma.sql`(${adAccount.orgId}::uuid, ${r.adId}::uuid, ${r.date}::date, ${r.impressions}, ${r.clicks}, ${r.spend}::decimal)`,
+        ),
+      );
+      await tx.$executeRaw`
+        INSERT INTO ad_daily_stats (org_id, ad_id, date, impressions, clicks, spend)
+        VALUES ${values}
+        ON CONFLICT (ad_id, date) DO UPDATE SET
+          impressions = EXCLUDED.impressions,
+          clicks = EXCLUDED.clicks,
+          spend = EXCLUDED.spend,
+          synced_at = now()
+      `;
+
+      return { syncedAds: ads.length, syncedDays: rows.length };
     });
   });
 
