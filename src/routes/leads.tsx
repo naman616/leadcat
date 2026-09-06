@@ -40,6 +40,7 @@ import { toast } from "sonner";
 import {
   bulkCreateLeads,
   createLead,
+  exportLeadsCsv,
   getLead,
   listLeads,
   reassignLead,
@@ -96,6 +97,16 @@ const statusTone = LEAD_STATUS_TONE;
 
 const tabs = ["All", "My Leads", "Unassigned"] as const;
 const statusFilters = ["All", ...LEAD_STATUS_VALUES] as const;
+
+function downloadCsvFile(csv: string, filename: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 const emptyDraft = {
   name: "",
@@ -230,6 +241,23 @@ function LeadsPage() {
     setBulkRows([]);
   }
 
+  const exportCsvMutation = useMutation({
+    mutationFn: exportLeadsCsv,
+    onSuccess: (csv) => {
+      downloadCsvFile(csv, "leads-export.csv");
+      toast.success("Leads exported");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Export failed"),
+  });
+
+  // Same status/assignedTo/search filters the list view queries with — the
+  // "Unassigned" tab's extra client-side filter (see `filtered` above) isn't
+  // reflected here, so exporting on that tab currently exports the same rows
+  // as "All". Fine for a first cut; revisit if that split matters in practice.
+  function handleExportCsv() {
+    exportCsvMutation.mutate({ data: filters });
+  }
+
   function handleBulkFile(file: File) {
     setBulkFileName(file.name);
     const reader = new FileReader();
@@ -243,13 +271,7 @@ function LeadsPage() {
   }
 
   function downloadImportTemplate() {
-    const blob = new Blob([LEAD_IMPORT_TEMPLATE_CSV], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "leadcat-leads-template.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsvFile(LEAD_IMPORT_TEMPLATE_CSV, "leadcat-leads-template.csv");
   }
 
   function submitBulkImport() {
@@ -349,10 +371,12 @@ function LeadsPage() {
               <Filter className="size-4" /> Filter
             </button>
             <button
-              onClick={() => toast.success(`Exported ${filtered.length} leads`)}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-secondary px-3.5 text-sm font-medium transition-colors hover:bg-accent"
+              onClick={handleExportCsv}
+              disabled={exportCsvMutation.isPending}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-secondary px-3.5 text-sm font-medium transition-colors hover:bg-accent disabled:opacity-60"
             >
-              <Download className="size-4" /> Export
+              <Download className="size-4" />{" "}
+              {exportCsvMutation.isPending ? "Exporting..." : "Export"}
             </button>
           </div>
 
