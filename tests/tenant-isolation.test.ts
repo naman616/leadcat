@@ -84,6 +84,50 @@ async function asAnonWithMetaPage<T>(pageId: string, fn: (tx: Tx) => Promise<T>)
   });
 }
 
+/**
+ * Same idea, for the WhatsApp inbound webhook's anon write path (see
+ * docs/specs/08-whatsapp-inbound-webhook.md). Sets both
+ * "request.whatsapp_phone_number_id" and "request.whatsapp_from_number"
+ * GUCs, which app.record_inbound_whatsapp_message()
+ * (prisma/migrations/20260904000000_whatsapp_inbound_webhook) reads.
+ * Mirrors the shape of withAnonWhatsAppWebhookContext in
+ * src/lib/db.server.ts (without the production wrapper's quote-escaping,
+ * unnecessary for this test's controlled inputs).
+ */
+async function asAnonWithWhatsAppNumber<T>(
+  phoneNumberId: string,
+  fromNumber: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE anon`);
+    await tx.$executeRawUnsafe(
+      `SET LOCAL "request.whatsapp_phone_number_id" TO '${phoneNumberId}'`,
+    );
+    await tx.$executeRawUnsafe(`SET LOCAL "request.whatsapp_from_number" TO '${fromNumber}'`);
+    return fn(tx);
+  });
+}
+
+/** Calls app.record_inbound_whatsapp_message() and returns the lead_id it resolved (or null). */
+async function recordInboundWhatsAppMessage(
+  phoneNumberId: string,
+  fromNumber: string,
+  args: { contactName: string; providerMessageId: string; body: string; capturedAt: Date },
+): Promise<string | null> {
+  const [row] = await asAnonWithWhatsAppNumber(
+    phoneNumberId,
+    fromNumber,
+    (tx) =>
+      tx.$queryRaw<{ lead_id: string | null }[]>`
+      SELECT app.record_inbound_whatsapp_message(
+        ${args.contactName}, ${args.providerMessageId}, ${args.body}, ${args.capturedAt}
+      ) AS lead_id
+    `,
+  );
+  return row?.lead_id ?? null;
+}
+
 const run = randomUUID().slice(0, 8);
 
 const orgA = { id: randomUUID(), name: "Org A Realty", slug: `org-a-${run}` };
@@ -2203,6 +2247,210 @@ describe("meta lead ads webhook — anon page-id write path", () => {
       tx.contact.deleteMany({ where: { orgId: orgA.id } }),
     );
     expect(deleted.count).toBe(0);
+  });
+});
+
+// Regression tests for 20260904000000_whatsapp_inbound_webhook and
+// src/lib/whatsapp.server.ts / whatsapp/webhook-handler.ts — WhatsApp
+// inbound lead source tagging.
+describe("org_whatsapp_credentials — admin-only", () => {
+  const orgAPhoneNumberId = `whatsapp-phone-a-${run}`;
+
+  it("an org admin CAN create their org's whatsapp credentials", async () => {
+    const created = await asUser(userA.id, (tx) =>
+      tx.orgWhatsAppCredential.create({
+        data: {
+          orgId: orgA.id,
+          whatsappPhoneNumberId: orgAPhoneNumberId,
+          whatsappAccessToken: "secret-token-a",
+        },
+      }),
+    );
+    expect(created.orgId).toBe(orgA.id);
+  });
+
+  it("a non-admin CANNOT create whatsapp credentials, even in their own org", async () => {
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.orgWhatsAppCredential.create({
+          data: {
+            orgId: orgA.id,
+            whatsappPhoneNumberId: `rejected-${run}`,
+            whatsappAccessToken: "nope",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("a non-admin CANNOT read whatsapp credentials, even in their own org", async () => {
+    const seen = await asUser(agentX.id, (tx) => tx.orgWhatsAppCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+
+  it("anon has zero access to whatsapp credentials", async () => {
+    const seen = await asAnon((tx) => tx.orgWhatsAppCredential.findMany());
+    expect(seen).toHaveLength(0);
+  });
+
+  it("an org admin CANNOT write into another org's whatsapp credentials", async () => {
+    const updateResult = await asUser(userB.id, (tx) =>
+      tx.orgWhatsAppCredential.updateMany({
+        where: { orgId: orgA.id },
+        data: { whatsappAccessToken: "hijacked-cross-org" },
+      }),
+    );
+    expect(updateResult.count).toBe(0);
+  });
+});
+
+describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
+  const orgAPhoneNumberId = `whatsapp-phone-inbound-a-${run}`;
+  const orgBPhoneNumberId = `whatsapp-phone-inbound-b-${run}`;
+
+  beforeAll(async () => {
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgA.id },
+      create: {
+        orgId: orgA.id,
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-a",
+      },
+      update: {
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-a",
+      },
+    });
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgB.id },
+      create: {
+        orgId: orgB.id,
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-b",
+      },
+      update: {
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "webhook-test-token-b",
+      },
+    });
+  });
+
+  it("an unknown phone number id resolves to no lead and writes nothing", async () => {
+    const leadId = await recordInboundWhatsAppMessage(`unknown-phone-${run}`, "911111111", {
+      contactName: "Nobody",
+      providerMessageId: `wamid-unknown-${run}`,
+      body: "Hello?",
+      capturedAt: new Date(),
+    });
+    expect(leadId).toBeNull();
+  });
+
+  it("the first message from a number creates a Contact + Lead with source WhatsApp", async () => {
+    const fromNumber = `919876${run}0`;
+    const leadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "New WhatsApp Lead",
+      providerMessageId: `wamid-first-${run}`,
+      body: "Hi, interested in 2BHK",
+      capturedAt: new Date(),
+    });
+    expect(leadId).not.toBeNull();
+
+    const lead = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: leadId! } }),
+    );
+    expect(lead.orgId).toBe(orgA.id);
+    expect(lead.source).toBe("WhatsApp");
+    expect(lead.subSource).toBe(orgAPhoneNumberId);
+
+    const contact = await asUser(userA.id, (tx) =>
+      tx.contact.findUniqueOrThrow({ where: { id: lead.contactId } }),
+    );
+    expect(contact.phone).toBe(fromNumber);
+    expect(contact.fullName).toBe("New WhatsApp Lead");
+
+    const message = await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.findFirstOrThrow({ where: { providerMessageId: `wamid-first-${run}` } }),
+    );
+    expect(message.direction).toBe("inbound");
+    expect(message.status).toBe("received");
+    expect(message.leadId).toBe(leadId);
+  });
+
+  it("a second message from the same number attaches to the same Lead, no duplicate Contact", async () => {
+    const fromNumber = `919876${run}1`;
+    const firstLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Repeat Contact",
+      providerMessageId: `wamid-repeat-1-${run}`,
+      body: "First message",
+      capturedAt: new Date(),
+    });
+    const secondLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Repeat Contact",
+      providerMessageId: `wamid-repeat-2-${run}`,
+      body: "Second message",
+      capturedAt: new Date(),
+    });
+    expect(secondLeadId).toBe(firstLeadId);
+
+    const contacts = await asUser(userA.id, (tx) =>
+      tx.contact.findMany({ where: { phone: fromNumber } }),
+    );
+    expect(contacts).toHaveLength(1);
+
+    const messages = await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.findMany({ where: { leadId: firstLeadId! } }),
+    );
+    expect(messages).toHaveLength(2);
+  });
+
+  it("a retried delivery (same provider_message_id) is a no-op", async () => {
+    const fromNumber = `919876${run}2`;
+    const leadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Retry Contact",
+      providerMessageId: `wamid-retry-${run}`,
+      body: "Original delivery",
+      capturedAt: new Date(),
+    });
+    const retriedLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Retry Contact",
+      providerMessageId: `wamid-retry-${run}`,
+      body: "Original delivery",
+      capturedAt: new Date(),
+    });
+    expect(retriedLeadId).toBe(leadId);
+
+    const messages = await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.findMany({ where: { providerMessageId: `wamid-retry-${run}` } }),
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("org A's phone number id never attributes a lead to org B, and vice versa", async () => {
+    const fromNumber = `919876${run}3`;
+    const leadIdViaA = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Org A Contact",
+      providerMessageId: `wamid-org-a-${run}`,
+      body: "To org A",
+      capturedAt: new Date(),
+    });
+    const leadViaA = await asUser(userA.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: leadIdViaA! } }),
+    );
+    expect(leadViaA.orgId).toBe(orgA.id);
+
+    // Same phone number messaging org B's number creates a separate Contact
+    // in org B — never attached to org A's Lead.
+    const leadIdViaB = await recordInboundWhatsAppMessage(orgBPhoneNumberId, fromNumber, {
+      contactName: "Org B Contact",
+      providerMessageId: `wamid-org-b-${run}`,
+      body: "To org B",
+      capturedAt: new Date(),
+    });
+    expect(leadIdViaB).not.toBe(leadIdViaA);
+    const leadViaB = await asUser(userB.id, (tx) =>
+      tx.lead.findUniqueOrThrow({ where: { id: leadIdViaB! } }),
+    );
+    expect(leadViaB.orgId).toBe(orgB.id);
   });
 });
 

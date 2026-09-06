@@ -54,6 +54,7 @@ model Organization {
   whatsappTemplates WhatsAppTemplate[]
   whatsappMessages  WhatsAppMessage[]
   orgMetaCredential OrgMetaCredential?
+  orgWhatsAppCredential OrgWhatsAppCredential?
 
   @@map("organizations")
 }
@@ -785,6 +786,7 @@ enum WhatsAppMessageStatus {
   delivered
   read
   failed
+  received
 
   @@map("whatsapp_message_status")
 }
@@ -817,22 +819,26 @@ model WhatsAppTemplate {
 /// lead_activities/call_logs: any org member can view or create, no
 /// admin gate — this is routine data entry, not template management.
 model WhatsAppMessage {
-  id         String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId      String                @map("org_id") @db.Uuid
-  leadId     String?               @map("lead_id") @db.Uuid
-  direction  WhatsAppDirection
-  fromNumber String                @map("from_number")
-  toNumber   String                @map("to_number")
-  body       String
-  templateId String?               @map("template_id") @db.Uuid
-  status     WhatsAppMessageStatus @default(queued)
-  createdAt  DateTime              @default(now()) @map("created_at")
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String                @map("org_id") @db.Uuid
+  leadId            String?               @map("lead_id") @db.Uuid
+  direction         WhatsAppDirection
+  fromNumber        String                @map("from_number")
+  toNumber          String                @map("to_number")
+  body              String
+  templateId        String?               @map("template_id") @db.Uuid
+  status            WhatsAppMessageStatus @default(queued)
+  /// WhatsApp's own message id ("wamid...") for an inbound message —
+  /// idempotency key against webhook retries. Null for outbound messages.
+  providerMessageId String?               @map("provider_message_id")
+  createdAt         DateTime              @default(now()) @map("created_at")
 
   organization Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
   lead         Lead?             @relation(fields: [leadId], references: [id], onDelete: Cascade)
   template     WhatsAppTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
 
   @@index([orgId, leadId])
+  @@unique([orgId, providerMessageId])
   @@map("whatsapp_messages")
 }
 
@@ -851,4 +857,20 @@ model OrgMetaCredential {
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@map("org_meta_credentials")
+}
+
+/// Which WhatsApp Business phone-number ID maps to which org (see
+/// docs/specs/08-whatsapp-inbound-webhook.md). Deliberately its own table,
+/// not columns on Organization — same reasoning as OrgMetaCredential: a
+/// bearer access token shouldn't be readable by every org member.
+model OrgWhatsAppCredential {
+  orgId                 String   @id @map("org_id") @db.Uuid
+  whatsappPhoneNumberId String   @unique @map("whatsapp_phone_number_id")
+  whatsappAccessToken   String   @map("whatsapp_access_token")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("org_whatsapp_credentials")
 }

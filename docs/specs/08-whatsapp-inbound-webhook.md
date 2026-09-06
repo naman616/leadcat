@@ -199,7 +199,11 @@ path to the real Supabase DB from this sandbox). Adds: the
 SELECT/INSERT/UPDATE/DELETE), the `provider_message_id` column + its
 org-scoped unique index on `whatsapp_messages`, the `received` enum
 value, and the `app.record_inbound_whatsapp_message()` `SECURITY DEFINER`
-function with `EXECUTE` granted to `anon` only. Verified via
+function with `EXECUTE` granted to `anon` (the role this function is
+designed for — Postgres also grants `EXECUTE` to `PUBLIC` by default on
+function creation, and this migration doesn't `REVOKE` that; closing it
+repo-wide across every `SECURITY DEFINER` function here is a separate
+future cleanup, not done in this migration). Verified via
 `prisma validate` + `db:generate` and a local throwaway Postgres
 container — **not** applied to the real Mumbai Supabase DB by this
 session; needs the same explicit `prisma migrate deploy` sign-off as
