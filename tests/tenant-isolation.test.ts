@@ -109,23 +109,39 @@ async function asAnonWithWhatsAppNumber<T>(
   });
 }
 
-/** Calls app.record_inbound_whatsapp_message() and returns the lead_id it resolved (or null). */
+/** Calls app.record_inbound_whatsapp_message() and returns what it resolved (or nulls). */
 async function recordInboundWhatsAppMessage(
   phoneNumberId: string,
   fromNumber: string,
   args: { contactName: string; providerMessageId: string; body: string; capturedAt: Date },
-): Promise<string | null> {
+): Promise<{ leadId: string | null; isNewLead: boolean | null }> {
   const [row] = await asAnonWithWhatsAppNumber(
     phoneNumberId,
     fromNumber,
     (tx) =>
-      tx.$queryRaw<{ lead_id: string | null }[]>`
-      SELECT app.record_inbound_whatsapp_message(
+      tx.$queryRaw<{ lead_id: string | null; is_new_lead: boolean | null }[]>`
+      SELECT lead_id, is_new_lead FROM app.record_inbound_whatsapp_message(
         ${args.contactName}, ${args.providerMessageId}, ${args.body}, ${args.capturedAt}
-      ) AS lead_id
+      )
     `,
   );
-  return row?.lead_id ?? null;
+  return { leadId: row?.lead_id ?? null, isNewLead: row?.is_new_lead ?? null };
+}
+
+/** Calls app.record_whatsapp_autoresponse_sent() as anon under the given phone/from context. */
+async function recordWhatsAppAutoresponseSent(
+  phoneNumberId: string,
+  fromNumber: string,
+  args: { leadId: string; body: string; providerMessageId: string },
+): Promise<void> {
+  await asAnonWithWhatsAppNumber(
+    phoneNumberId,
+    fromNumber,
+    (tx) =>
+      tx.$executeRaw`SELECT app.record_whatsapp_autoresponse_sent(
+      ${args.leadId}::uuid, ${args.body}, ${args.providerMessageId}
+    )`,
+  );
 }
 
 const run = randomUUID().slice(0, 8);
@@ -2336,24 +2352,34 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
   });
 
   it("an unknown phone number id resolves to no lead and writes nothing", async () => {
-    const leadId = await recordInboundWhatsAppMessage(`unknown-phone-${run}`, "911111111", {
-      contactName: "Nobody",
-      providerMessageId: `wamid-unknown-${run}`,
-      body: "Hello?",
-      capturedAt: new Date(),
-    });
+    const { leadId, isNewLead } = await recordInboundWhatsAppMessage(
+      `unknown-phone-${run}`,
+      "911111111",
+      {
+        contactName: "Nobody",
+        providerMessageId: `wamid-unknown-${run}`,
+        body: "Hello?",
+        capturedAt: new Date(),
+      },
+    );
     expect(leadId).toBeNull();
+    expect(isNewLead).toBeNull();
   });
 
-  it("the first message from a number creates a Contact + Lead with source WhatsApp", async () => {
+  it("the first message from a number creates a Contact + Lead with source WhatsApp, and reports is_new_lead", async () => {
     const fromNumber = `919876${run}0`;
-    const leadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
-      contactName: "New WhatsApp Lead",
-      providerMessageId: `wamid-first-${run}`,
-      body: "Hi, interested in 2BHK",
-      capturedAt: new Date(),
-    });
+    const { leadId, isNewLead } = await recordInboundWhatsAppMessage(
+      orgAPhoneNumberId,
+      fromNumber,
+      {
+        contactName: "New WhatsApp Lead",
+        providerMessageId: `wamid-first-${run}`,
+        body: "Hi, interested in 2BHK",
+        capturedAt: new Date(),
+      },
+    );
     expect(leadId).not.toBeNull();
+    expect(isNewLead).toBe(true);
 
     const lead = await asUser(userA.id, (tx) =>
       tx.lead.findUniqueOrThrow({ where: { id: leadId! } }),
@@ -2376,21 +2402,31 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
     expect(message.leadId).toBe(leadId);
   });
 
-  it("a second message from the same number attaches to the same Lead, no duplicate Contact", async () => {
+  it("a second message from the same number attaches to the same Lead, no duplicate Contact, and is_new_lead is false", async () => {
     const fromNumber = `919876${run}1`;
-    const firstLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
-      contactName: "Repeat Contact",
-      providerMessageId: `wamid-repeat-1-${run}`,
-      body: "First message",
-      capturedAt: new Date(),
-    });
-    const secondLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
-      contactName: "Repeat Contact",
-      providerMessageId: `wamid-repeat-2-${run}`,
-      body: "Second message",
-      capturedAt: new Date(),
-    });
+    const { leadId: firstLeadId, isNewLead: firstIsNewLead } = await recordInboundWhatsAppMessage(
+      orgAPhoneNumberId,
+      fromNumber,
+      {
+        contactName: "Repeat Contact",
+        providerMessageId: `wamid-repeat-1-${run}`,
+        body: "First message",
+        capturedAt: new Date(),
+      },
+    );
+    expect(firstIsNewLead).toBe(true);
+    const { leadId: secondLeadId, isNewLead: secondIsNewLead } = await recordInboundWhatsAppMessage(
+      orgAPhoneNumberId,
+      fromNumber,
+      {
+        contactName: "Repeat Contact",
+        providerMessageId: `wamid-repeat-2-${run}`,
+        body: "Second message",
+        capturedAt: new Date(),
+      },
+    );
     expect(secondLeadId).toBe(firstLeadId);
+    expect(secondIsNewLead).toBe(false);
 
     const contacts = await asUser(userA.id, (tx) =>
       tx.contact.findMany({ where: { phone: fromNumber } }),
@@ -2403,21 +2439,23 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
     expect(messages).toHaveLength(2);
   });
 
-  it("a retried delivery (same provider_message_id) is a no-op", async () => {
+  it("a retried delivery (same provider_message_id) is a no-op, and is_new_lead is false (never re-fires the auto-response)", async () => {
     const fromNumber = `919876${run}2`;
-    const leadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+    const { leadId } = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
       contactName: "Retry Contact",
       providerMessageId: `wamid-retry-${run}`,
       body: "Original delivery",
       capturedAt: new Date(),
     });
-    const retriedLeadId = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
-      contactName: "Retry Contact",
-      providerMessageId: `wamid-retry-${run}`,
-      body: "Original delivery",
-      capturedAt: new Date(),
-    });
+    const { leadId: retriedLeadId, isNewLead: retriedIsNewLead } =
+      await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+        contactName: "Retry Contact",
+        providerMessageId: `wamid-retry-${run}`,
+        body: "Original delivery",
+        capturedAt: new Date(),
+      });
     expect(retriedLeadId).toBe(leadId);
+    expect(retriedIsNewLead).toBe(false);
 
     const messages = await asUser(userA.id, (tx) =>
       tx.whatsAppMessage.findMany({ where: { providerMessageId: `wamid-retry-${run}` } }),
@@ -2427,12 +2465,16 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
 
   it("org A's phone number id never attributes a lead to org B, and vice versa", async () => {
     const fromNumber = `919876${run}3`;
-    const leadIdViaA = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
-      contactName: "Org A Contact",
-      providerMessageId: `wamid-org-a-${run}`,
-      body: "To org A",
-      capturedAt: new Date(),
-    });
+    const { leadId: leadIdViaA } = await recordInboundWhatsAppMessage(
+      orgAPhoneNumberId,
+      fromNumber,
+      {
+        contactName: "Org A Contact",
+        providerMessageId: `wamid-org-a-${run}`,
+        body: "To org A",
+        capturedAt: new Date(),
+      },
+    );
     const leadViaA = await asUser(userA.id, (tx) =>
       tx.lead.findUniqueOrThrow({ where: { id: leadIdViaA! } }),
     );
@@ -2440,17 +2482,116 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
 
     // Same phone number messaging org B's number creates a separate Contact
     // in org B — never attached to org A's Lead.
-    const leadIdViaB = await recordInboundWhatsAppMessage(orgBPhoneNumberId, fromNumber, {
-      contactName: "Org B Contact",
-      providerMessageId: `wamid-org-b-${run}`,
-      body: "To org B",
-      capturedAt: new Date(),
-    });
+    const { leadId: leadIdViaB } = await recordInboundWhatsAppMessage(
+      orgBPhoneNumberId,
+      fromNumber,
+      {
+        contactName: "Org B Contact",
+        providerMessageId: `wamid-org-b-${run}`,
+        body: "To org B",
+        capturedAt: new Date(),
+      },
+    );
     expect(leadIdViaB).not.toBe(leadIdViaA);
     const leadViaB = await asUser(userB.id, (tx) =>
       tx.lead.findUniqueOrThrow({ where: { id: leadIdViaB! } }),
     );
     expect(leadViaB.orgId).toBe(orgB.id);
+  });
+});
+
+// Regression tests for 20260906000000_whatsapp_auto_first_response —
+// app.record_whatsapp_autoresponse_sent, the second anon-callable
+// SECURITY DEFINER function this migration adds (see
+// docs/specs/09-whatsapp-auto-first-response.md).
+describe("whatsapp auto-first-response — record_whatsapp_autoresponse_sent", () => {
+  const orgAPhoneNumberId = `whatsapp-phone-autoresp-a-${run}`;
+  const orgBPhoneNumberId = `whatsapp-phone-autoresp-b-${run}`;
+
+  beforeAll(async () => {
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgA.id },
+      create: {
+        orgId: orgA.id,
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-a",
+      },
+      update: {
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-a",
+      },
+    });
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgB.id },
+      create: {
+        orgId: orgB.id,
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-b",
+      },
+      update: {
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-b",
+      },
+    });
+  });
+
+  it("records an outbound whatsapp_messages row for a lead that belongs to the resolved org", async () => {
+    const fromNumber = `919876${run}4`;
+    const { leadId } = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
+      contactName: "Autoresponse Target",
+      providerMessageId: `wamid-autoresp-src-${run}`,
+      body: "Hi",
+      capturedAt: new Date(),
+    });
+    expect(leadId).not.toBeNull();
+
+    await recordWhatsAppAutoresponseSent(orgAPhoneNumberId, fromNumber, {
+      leadId: leadId!,
+      body: "Thanks for reaching out! Our team will get back to you shortly.",
+      providerMessageId: `wamid-autoresp-${run}`,
+    });
+
+    const outbound = await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.findFirstOrThrow({
+        where: { providerMessageId: `wamid-autoresp-${run}` },
+      }),
+    );
+    expect(outbound.direction).toBe("outbound");
+    expect(outbound.status).toBe("sent");
+    expect(outbound.leadId).toBe(leadId);
+    expect(outbound.orgId).toBe(orgA.id);
+  });
+
+  it("silently does nothing if the lead_id doesn't belong to the phone_number_id's org (cross-org)", async () => {
+    const fromNumberA = `919876${run}5`;
+    const { leadId: leadIdInOrgA } = await recordInboundWhatsAppMessage(
+      orgAPhoneNumberId,
+      fromNumberA,
+      {
+        contactName: "Org A Lead",
+        providerMessageId: `wamid-crossorg-src-${run}`,
+        body: "Hi",
+        capturedAt: new Date(),
+      },
+    );
+    expect(leadIdInOrgA).not.toBeNull();
+
+    // Attempt to record an autoresponse against org A's lead but under org
+    // B's phone_number_id/from_number context — must not create a row at
+    // all, not misattribute one to org B.
+    const fromNumberB = `919876${run}6`;
+    await recordWhatsAppAutoresponseSent(orgBPhoneNumberId, fromNumberB, {
+      leadId: leadIdInOrgA!,
+      body: "Should never be written",
+      providerMessageId: `wamid-crossorg-autoresp-${run}`,
+    });
+
+    const written = await asUser(userA.id, (tx) =>
+      tx.whatsAppMessage.findMany({
+        where: { providerMessageId: `wamid-crossorg-autoresp-${run}` },
+      }),
+    );
+    expect(written).toHaveLength(0);
   });
 });
 
