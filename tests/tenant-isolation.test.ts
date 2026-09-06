@@ -995,6 +995,189 @@ describe("ad hierarchy isolation", () => {
   });
 });
 
+// Regression tests for 20260906020000_ad_daily_stats (issues #27-29) — see
+// docs/specs/10-ad-spend-sync.md. Covers ad_daily_stats' RLS (same shape as
+// the ad hierarchy tables above) and syncAdSpend end-to-end against the
+// mock provider (no real vendor credentials exist yet).
+describe("ad spend sync (ad_daily_stats)", () => {
+  async function seedAdAccountWithOneAd(orgId: string, suffix: string) {
+    const account = await prisma.adAccount.create({
+      data: {
+        orgId,
+        platform: "meta",
+        externalAccountId: `act_spend_${suffix}`,
+        name: `Spend test account ${suffix}`,
+      },
+    });
+    const campaign = await prisma.campaign.create({
+      data: {
+        orgId,
+        adAccountId: account.id,
+        externalCampaignId: `camp_${suffix}`,
+        name: "Campaign",
+      },
+    });
+    const adSet = await prisma.adSet.create({
+      data: { orgId, campaignId: campaign.id, externalAdSetId: `adset_${suffix}`, name: "Ad set" },
+    });
+    const ad = await prisma.ad.create({
+      data: { orgId, adSetId: adSet.id, externalAdId: `ad_${suffix}`, name: "Test ad" },
+    });
+    return { account, ad };
+  }
+
+  it("org members can view ad daily stats in their org, but not another org's", async () => {
+    const { ad } = await seedAdAccountWithOneAd(orgA.id, `view-${run}`);
+    const stat = await prisma.adDailyStat.create({
+      data: {
+        orgId: orgA.id,
+        adId: ad.id,
+        date: new Date("2026-01-01"),
+        impressions: 100,
+        clicks: 5,
+        spend: "25.00",
+      },
+    });
+
+    const seenByA = await asUser(userA.id, (tx) => tx.adDailyStat.findMany());
+    expect(seenByA.map((s) => s.id)).toContain(stat.id);
+
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.adDailyStat.findUnique({ where: { id: stat.id } }),
+    );
+    expect(seenByB).toBeNull();
+  });
+
+  it("a non-admin CANNOT write ad daily stats, even in their own org", async () => {
+    const { ad } = await seedAdAccountWithOneAd(orgA.id, `nonadmin-${run}`);
+    await expect(
+      asUser(agentX.id, (tx) =>
+        tx.adDailyStat.create({
+          data: {
+            orgId: orgA.id,
+            adId: ad.id,
+            date: new Date("2026-01-01"),
+            impressions: 1,
+            clicks: 1,
+            spend: "1.00",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  // Mirrors src/lib/ad-spend.server.ts's syncAdSpend exactly, including its
+  // bulk INSERT ... ON CONFLICT (not a per-row ORM upsert loop) — a plain
+  // upsert loop here would pass even if the real raw-SQL statement were
+  // broken. syncAdSpend itself is a createServerFn (needs a real request
+  // context this test file doesn't have), same precedent as
+  // exportLeadsCsv/sendWhatsAppMessage above for replicating a handler body
+  // via asUser rather than calling the server function directly.
+  async function runSyncAdSpend(
+    account: { orgId: string; externalAccountId: string },
+    adId: string,
+    externalAdId: string,
+  ) {
+    const { MockMetaMarketingProvider } = await import("../src/lib/ad-spend/mock-meta-provider");
+    const provider = new MockMetaMarketingProvider();
+    const until = new Date();
+    const since = new Date(until);
+    since.setDate(since.getDate() - 27);
+    const points = await provider.fetchDailyStats(
+      account.externalAccountId,
+      [externalAdId],
+      since,
+      until,
+    );
+
+    return asUser(userA2.id, async (tx) => {
+      const { Prisma } = await import("@prisma/client");
+      const values = Prisma.join(
+        points.map(
+          (p) =>
+            Prisma.sql`(${account.orgId}::uuid, ${adId}::uuid, ${p.date}::date, ${p.impressions}, ${p.clicks}, ${p.spend}::decimal)`,
+        ),
+      );
+      await tx.$executeRaw`
+        INSERT INTO ad_daily_stats (org_id, ad_id, date, impressions, clicks, spend)
+        VALUES ${values}
+        ON CONFLICT (ad_id, date) DO UPDATE SET
+          impressions = EXCLUDED.impressions,
+          clicks = EXCLUDED.clicks,
+          spend = EXCLUDED.spend,
+          synced_at = now()
+      `;
+      return points.length;
+    });
+  }
+
+  it("syncAdSpend upserts a stat row per day in the trailing 28-day window", async () => {
+    const { account, ad } = await seedAdAccountWithOneAd(orgA.id, `sync-${run}`);
+
+    const result = await runSyncAdSpend(account, ad.id, ad.externalAdId);
+    expect(result).toBe(28);
+
+    const stats = await asUser(userA.id, (tx) =>
+      tx.adDailyStat.findMany({ where: { adId: ad.id } }),
+    );
+    expect(stats).toHaveLength(28);
+    expect(stats.every((s) => Number(s.impressions) > 0)).toBe(true);
+  });
+
+  it("re-running syncAdSpend's bulk upsert overwrites existing days instead of duplicating them", async () => {
+    const { account, ad } = await seedAdAccountWithOneAd(orgA.id, `bulk-resync-${run}`);
+
+    await runSyncAdSpend(account, ad.id, ad.externalAdId);
+    const firstRun = await prisma.adDailyStat.findMany({
+      where: { adId: ad.id },
+      orderBy: { date: "asc" },
+    });
+    expect(firstRun).toHaveLength(28);
+
+    await runSyncAdSpend(account, ad.id, ad.externalAdId);
+    const secondRun = await prisma.adDailyStat.findMany({ where: { adId: ad.id } });
+    // Same 28 (ad, date) rows, not 56 — the ON CONFLICT target actually matched.
+    expect(secondRun).toHaveLength(28);
+  });
+
+  it("re-syncing overwrites an existing day's row instead of duplicating it", async () => {
+    const { ad } = await seedAdAccountWithOneAd(orgA.id, `resync-${run}`);
+    const date = new Date("2026-02-01");
+
+    await prisma.adDailyStat.create({
+      data: { orgId: orgA.id, adId: ad.id, date, impressions: 1, clicks: 1, spend: "1.00" },
+    });
+
+    const upserted = await asUser(userA2.id, (tx) =>
+      tx.adDailyStat.upsert({
+        where: { adId_date: { adId: ad.id, date } },
+        create: {
+          orgId: orgA.id,
+          adId: ad.id,
+          date,
+          impressions: 999,
+          clicks: 99,
+          spend: "999.00",
+        },
+        update: { impressions: 999, clicks: 99, spend: "999.00" },
+      }),
+    );
+    expect(upserted.impressions).toBe(999);
+
+    const rows = await prisma.adDailyStat.findMany({ where: { adId: ad.id, date } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.impressions).toBe(999);
+  });
+
+  it("an org member cannot sync (read the ad account of) another org's ad account", async () => {
+    const { account } = await seedAdAccountWithOneAd(orgB.id, `crossorg-${run}`);
+    const seenByA = await asUser(userA.id, (tx) =>
+      tx.adAccount.findUnique({ where: { id: account.id } }),
+    );
+    expect(seenByA).toBeNull();
+  });
+});
+
 // Issue #22 — public website lead-capture form. This is the first write
 // path an unauthenticated caller has anywhere in the app, so it gets its
 // own describe block covering exactly the guarantees CLAUDE.md requires:
