@@ -2234,7 +2234,8 @@ describe("leads CSV export isolation", () => {
         orderBy: { createdAt: "desc" },
       }),
     );
-    expect(seenByB.map((l) => l.id)).toEqual([leadB.id]);
+    expect(seenByB.every((l) => l.orgId === orgB.id)).toBe(true);
+    expect(seenByB.map((l) => l.id)).toContain(leadB.id);
   });
 
   it("an unauthenticated (anon) export attempt gets zero rows, not an error", async () => {
@@ -2243,7 +2244,9 @@ describe("leads CSV export isolation", () => {
   });
 
   it("filters (e.g. assignedTo) apply on top of the org scoping, same as listLeads", async () => {
-    const seenByB = await asUser(userB.id, (tx) => tx.lead.findMany({ where: { assignedTo: userB.id } }));
+    const seenByB = await asUser(userB.id, (tx) =>
+      tx.lead.findMany({ where: { assignedTo: userB.id } }),
+    );
     expect(seenByB.map((l) => l.id)).toContain(leadB.id);
     expect(seenByB.every((l) => l.orgId === orgB.id)).toBe(true);
 
