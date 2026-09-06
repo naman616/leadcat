@@ -2505,6 +2505,36 @@ describe("whatsapp inbound webhook — record_inbound_whatsapp_message", () => {
 // SECURITY DEFINER function this migration adds (see
 // docs/specs/09-whatsapp-auto-first-response.md).
 describe("whatsapp auto-first-response — record_whatsapp_autoresponse_sent", () => {
+  const orgAPhoneNumberId = `whatsapp-phone-autoresp-a-${run}`;
+  const orgBPhoneNumberId = `whatsapp-phone-autoresp-b-${run}`;
+
+  beforeAll(async () => {
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgA.id },
+      create: {
+        orgId: orgA.id,
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-a",
+      },
+      update: {
+        whatsappPhoneNumberId: orgAPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-a",
+      },
+    });
+    await prisma.orgWhatsAppCredential.upsert({
+      where: { orgId: orgB.id },
+      create: {
+        orgId: orgB.id,
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-b",
+      },
+      update: {
+        whatsappPhoneNumberId: orgBPhoneNumberId,
+        whatsappAccessToken: "autoresponse-test-token-b",
+      },
+    });
+  });
+
   it("records an outbound whatsapp_messages row for a lead that belongs to the resolved org", async () => {
     const fromNumber = `919876${run}4`;
     const { leadId } = await recordInboundWhatsAppMessage(orgAPhoneNumberId, fromNumber, {
