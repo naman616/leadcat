@@ -62,6 +62,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -1289,7 +1290,16 @@ function LeadPreview({
         )}
       </aside>
 
-      <Dialog open={whatsappOpen} onOpenChange={setWhatsappOpen}>
+      <Dialog
+        open={whatsappOpen}
+        onOpenChange={(open) => {
+          setWhatsappOpen(open);
+          // Clear on every close path (send, cancel, Escape, backdrop) —
+          // LeadPreview stays mounted across lead switches, so a leftover
+          // draft would otherwise resurface addressed to a different lead.
+          if (!open) setWhatsappBody("");
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>WhatsApp {lead?.contact.fullName}</DialogTitle>
@@ -1297,12 +1307,12 @@ function LeadPreview({
               Sends to {lead?.contact.phone ?? "this lead"} and logs it on the timeline.
             </DialogDescription>
           </DialogHeader>
-          <textarea
+          <Textarea
             value={whatsappBody}
             onChange={(e) => setWhatsappBody(e.target.value)}
             placeholder="Type a message..."
             rows={4}
-            className="w-full rounded-xl border border-input bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring/40"
+            disabled={whatsappMutation.isPending}
           />
           <DialogFooter>
             <Button
