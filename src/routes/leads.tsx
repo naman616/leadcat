@@ -48,6 +48,7 @@ import {
   addLeadNote,
   setNextAction,
 } from "@/lib/leads.server";
+import { sendWhatsAppMessage } from "@/lib/whatsapp.server";
 import { listOrgMembers } from "@/lib/org-members.server";
 import { getCurrentUser } from "@/lib/auth.server";
 import {
@@ -916,6 +917,8 @@ function LeadPreview({
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof previewTabs)[number]>("Overview");
   const [noteText, setNoteText] = useState("");
+  const [whatsappOpen, setWhatsappOpen] = useState(false);
+  const [whatsappBody, setWhatsappBody] = useState("");
   const nextActionInputRef = useRef<HTMLInputElement>(null);
 
   const leadQuery = useQuery({
@@ -968,6 +971,17 @@ function LeadPreview({
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not save note"),
   });
 
+  const whatsappMutation = useMutation({
+    mutationFn: sendWhatsAppMessage,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      setWhatsappBody("");
+      setWhatsappOpen(false);
+      toast.success("WhatsApp message sent");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not send message"),
+  });
+
   return (
     <>
       <div
@@ -1007,7 +1021,11 @@ function LeadPreview({
                     key={label}
                     aria-label={label}
                     title={label}
-                    onClick={() => toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)}
+                    onClick={() =>
+                      label === "WhatsApp"
+                        ? setWhatsappOpen(true)
+                        : toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)
+                    }
                     className="grid size-8 place-items-center rounded-md bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                   >
                     <Icon className="size-4" />
@@ -1270,6 +1288,41 @@ function LeadPreview({
           </>
         )}
       </aside>
+
+      <Dialog open={whatsappOpen} onOpenChange={setWhatsappOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>WhatsApp {lead?.contact.fullName}</DialogTitle>
+            <DialogDescription>
+              Sends to {lead?.contact.phone ?? "this lead"} and logs it on the timeline.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            value={whatsappBody}
+            onChange={(e) => setWhatsappBody(e.target.value)}
+            placeholder="Type a message..."
+            rows={4}
+            className="w-full rounded-xl border border-input bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring/40"
+          />
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                if (!lead?.contact.phone || !whatsappBody.trim()) return;
+                whatsappMutation.mutate({
+                  data: {
+                    leadId: lead.id,
+                    toNumber: lead.contact.phone,
+                    body: whatsappBody.trim(),
+                  },
+                });
+              }}
+              disabled={whatsappMutation.isPending || !whatsappBody.trim() || !lead?.contact.phone}
+            >
+              {whatsappMutation.isPending ? "Sending..." : "Send"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
