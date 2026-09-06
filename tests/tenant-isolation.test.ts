@@ -1066,14 +1066,18 @@ describe("ad spend sync (ad_daily_stats)", () => {
     ).rejects.toThrow(/row-level security/);
   });
 
-  it("syncAdSpend upserts a stat row per day in the trailing 28-day window", async () => {
-    const { account, ad } = await seedAdAccountWithOneAd(orgA.id, `sync-${run}`);
-
-    // syncAdSpend is a createServerFn (needs a real request context this
-    // test file doesn't have) — same precedent as exportLeadsCsv/
-    // sendWhatsAppMessage above: replicate its handler body via asUser
-    // rather than calling the server function directly. Mirrors
-    // src/lib/ad-spend.server.ts's syncAdSpend exactly.
+  // Mirrors src/lib/ad-spend.server.ts's syncAdSpend exactly, including its
+  // bulk INSERT ... ON CONFLICT (not a per-row ORM upsert loop) — a plain
+  // upsert loop here would pass even if the real raw-SQL statement were
+  // broken. syncAdSpend itself is a createServerFn (needs a real request
+  // context this test file doesn't have), same precedent as
+  // exportLeadsCsv/sendWhatsAppMessage above for replicating a handler body
+  // via asUser rather than calling the server function directly.
+  async function runSyncAdSpend(
+    account: { orgId: string; externalAccountId: string },
+    adId: string,
+    externalAdId: string,
+  ) {
     const { MockMetaMarketingProvider } = await import("../src/lib/ad-spend/mock-meta-provider");
     const provider = new MockMetaMarketingProvider();
     const until = new Date();
@@ -1081,27 +1085,36 @@ describe("ad spend sync (ad_daily_stats)", () => {
     since.setDate(since.getDate() - 27);
     const points = await provider.fetchDailyStats(
       account.externalAccountId,
-      [ad.externalAdId],
+      [externalAdId],
       since,
       until,
     );
-    const result = await asUser(userA2.id, async (tx) => {
-      for (const point of points) {
-        await tx.adDailyStat.upsert({
-          where: { adId_date: { adId: ad.id, date: new Date(point.date) } },
-          create: {
-            orgId: account.orgId,
-            adId: ad.id,
-            date: new Date(point.date),
-            impressions: point.impressions,
-            clicks: point.clicks,
-            spend: point.spend,
-          },
-          update: { impressions: point.impressions, clicks: point.clicks, spend: point.spend },
-        });
-      }
+
+    return asUser(userA2.id, async (tx) => {
+      const { Prisma } = await import("@prisma/client");
+      const values = Prisma.join(
+        points.map(
+          (p) =>
+            Prisma.sql`(${account.orgId}::uuid, ${adId}::uuid, ${p.date}::date, ${p.impressions}, ${p.clicks}, ${p.spend}::decimal)`,
+        ),
+      );
+      await tx.$executeRaw`
+        INSERT INTO ad_daily_stats (org_id, ad_id, date, impressions, clicks, spend)
+        VALUES ${values}
+        ON CONFLICT (ad_id, date) DO UPDATE SET
+          impressions = EXCLUDED.impressions,
+          clicks = EXCLUDED.clicks,
+          spend = EXCLUDED.spend,
+          synced_at = now()
+      `;
       return points.length;
     });
+  }
+
+  it("syncAdSpend upserts a stat row per day in the trailing 28-day window", async () => {
+    const { account, ad } = await seedAdAccountWithOneAd(orgA.id, `sync-${run}`);
+
+    const result = await runSyncAdSpend(account, ad.id, ad.externalAdId);
     expect(result).toBe(28);
 
     const stats = await asUser(userA.id, (tx) =>
@@ -1109,6 +1122,22 @@ describe("ad spend sync (ad_daily_stats)", () => {
     );
     expect(stats).toHaveLength(28);
     expect(stats.every((s) => Number(s.impressions) > 0)).toBe(true);
+  });
+
+  it("re-running syncAdSpend's bulk upsert overwrites existing days instead of duplicating them", async () => {
+    const { account, ad } = await seedAdAccountWithOneAd(orgA.id, `bulk-resync-${run}`);
+
+    await runSyncAdSpend(account, ad.id, ad.externalAdId);
+    const firstRun = await prisma.adDailyStat.findMany({
+      where: { adId: ad.id },
+      orderBy: { date: "asc" },
+    });
+    expect(firstRun).toHaveLength(28);
+
+    await runSyncAdSpend(account, ad.id, ad.externalAdId);
+    const secondRun = await prisma.adDailyStat.findMany({ where: { adId: ad.id } });
+    // Same 28 (ad, date) rows, not 56 — the ON CONFLICT target actually matched.
+    expect(secondRun).toHaveLength(28);
   });
 
   it("re-syncing overwrites an existing day's row instead of duplicating it", async () => {
