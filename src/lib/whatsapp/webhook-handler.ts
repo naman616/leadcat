@@ -1,5 +1,11 @@
 import { withAnonWhatsAppWebhookContext } from "../db.server";
 import { verifyMetaSignature } from "../meta-lead-ads/verify-signature";
+import { whatsappProvider } from "../whatsapp.server";
+
+// ponytail: one hardcoded reply for every org, no per-org template
+// selection. Add a WhatsAppTemplate "is_default" flag + admin UI to pick
+// one when orgs need to customize this.
+const AUTO_FIRST_RESPONSE_BODY = "Thanks for reaching out! Our team will get back to you shortly.";
 
 interface WhatsAppInboundMessage {
   id: string;
@@ -44,11 +50,43 @@ function handleVerificationRequest(url: URL): Response {
 }
 
 /**
+ * Sends the auto-first-response via WhatsAppProvider, then records it as an
+ * outbound whatsapp_messages row via app.record_whatsapp_autoresponse_sent.
+ * Failure here (provider error, DB error) is logged and swallowed — the
+ * inbound message was already recorded successfully by the caller, so this
+ * is a best-effort follow-up, not something that should mark the inbound
+ * delivery as failed.
+ */
+async function sendAutoFirstResponse(
+  phoneNumberId: string,
+  fromNumber: string,
+  leadId: string,
+): Promise<void> {
+  try {
+    const { providerMessageId } = await whatsappProvider.sendMessage(
+      fromNumber,
+      AUTO_FIRST_RESPONSE_BODY,
+    );
+    await withAnonWhatsAppWebhookContext(
+      phoneNumberId,
+      fromNumber,
+      (tx) =>
+        tx.$executeRaw`SELECT app.record_whatsapp_autoresponse_sent(
+        ${leadId}::uuid, ${AUTO_FIRST_RESPONSE_BODY}, ${providerMessageId}
+      )`,
+    );
+  } catch (error) {
+    console.error(`[whatsapp webhook] auto-first-response failed for lead ${leadId}:`, error);
+  }
+}
+
+/**
  * Processes one "messages" change value: for each text message, calls
  * app.record_inbound_whatsapp_message via withAnonWhatsAppWebhookContext.
  * Non-text messages are logged and skipped without touching the DB. Each
  * message is isolated in its own try/catch — one failing message never
- * blocks its siblings in the same delivery.
+ * blocks its siblings in the same delivery. The first message from a new
+ * number (is_new_lead) triggers a fire-and-forget auto-first-response.
  */
 async function processMessagesChange(value: WhatsAppMessagesChangeValue): Promise<void> {
   const phoneNumberId = value.metadata.phone_number_id;
@@ -70,16 +108,20 @@ async function processMessagesChange(value: WhatsAppMessagesChangeValue): Promis
         phoneNumberId,
         message.from,
         (tx) =>
-          tx.$queryRaw<{ lead_id: string | null }[]>`
-          SELECT app.record_inbound_whatsapp_message(
+          tx.$queryRaw<{ lead_id: string | null; is_new_lead: boolean }[]>`
+          SELECT lead_id, is_new_lead FROM app.record_inbound_whatsapp_message(
             ${contactName || message.from}, ${message.id}, ${message.text!.body}, ${capturedAt}
-          ) AS lead_id
+          )
         `,
       );
       if (!row?.lead_id) {
         console.error(
           `[whatsapp webhook] unattributable phone_number_id: ${phoneNumberId} (message ${message.id})`,
         );
+        continue;
+      }
+      if (row.is_new_lead) {
+        await sendAutoFirstResponse(phoneNumberId, message.from, row.lead_id);
       }
     } catch (error) {
       console.error(`[whatsapp webhook] failed to process message ${message.id}:`, error);

@@ -5,8 +5,10 @@ import { requireUserId, requirePrimaryOrgId } from "./current-user.server";
 import { MockWhatsAppProvider } from "./whatsapp/mock-provider";
 
 // The one line to change when a real WhatsApp Business API account exists
-// (issue #31) — everything below depends only on WhatsAppProvider.
-const whatsappProvider = new MockWhatsAppProvider();
+// (issue #31) — everything below depends only on WhatsAppProvider. Exported
+// so the inbound webhook handler (src/lib/whatsapp/webhook-handler.ts) can
+// send the auto-first-response through the same provider instance.
+export const whatsappProvider = new MockWhatsAppProvider();
 
 const createTemplateSchema = z.object({
   name: z.string().min(1),
