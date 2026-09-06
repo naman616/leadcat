@@ -48,6 +48,7 @@ import {
   addLeadNote,
   setNextAction,
 } from "@/lib/leads.server";
+import { initiateClickToCall } from "@/lib/telephony.server";
 import { listOrgMembers } from "@/lib/org-members.server";
 import { getCurrentUser } from "@/lib/auth.server";
 import {
@@ -916,6 +917,10 @@ function LeadPreview({
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof previewTabs)[number]>("Overview");
   const [noteText, setNoteText] = useState("");
+  const [callOpen, setCallOpen] = useState(false);
+  const [agentPhoneNumber, setAgentPhoneNumber] = useState(() =>
+    typeof window === "undefined" ? "" : (localStorage.getItem("leadcat:agentPhoneNumber") ?? ""),
+  );
   const nextActionInputRef = useRef<HTMLInputElement>(null);
 
   const leadQuery = useQuery({
@@ -968,6 +973,17 @@ function LeadPreview({
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not save note"),
   });
 
+  const callMutation = useMutation({
+    mutationFn: initiateClickToCall,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      localStorage.setItem("leadcat:agentPhoneNumber", agentPhoneNumber);
+      setCallOpen(false);
+      toast.success("Call initiated");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not place call"),
+  });
+
   return (
     <>
       <div
@@ -1007,7 +1023,11 @@ function LeadPreview({
                     key={label}
                     aria-label={label}
                     title={label}
-                    onClick={() => toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)}
+                    onClick={() =>
+                      label === "Call"
+                        ? setCallOpen(true)
+                        : toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)
+                    }
                     className="grid size-8 place-items-center rounded-md bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                   >
                     <Icon className="size-4" />
@@ -1270,6 +1290,39 @@ function LeadPreview({
           </>
         )}
       </aside>
+
+      <Dialog open={callOpen} onOpenChange={setCallOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Call {lead?.contact.fullName}</DialogTitle>
+            <DialogDescription>
+              Calls {lead?.contact.phone ?? "this lead"} and logs it on the timeline.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="agent-phone-number">Your number</Label>
+            <Input
+              id="agent-phone-number"
+              value={agentPhoneNumber}
+              onChange={(e) => setAgentPhoneNumber(e.target.value)}
+              placeholder="9876543210"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                if (!lead || !agentPhoneNumber.trim()) return;
+                callMutation.mutate({
+                  data: { leadId: lead.id, agentPhoneNumber: agentPhoneNumber.trim() },
+                });
+              }}
+              disabled={callMutation.isPending || !agentPhoneNumber.trim()}
+            >
+              {callMutation.isPending ? "Calling..." : "Call"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
