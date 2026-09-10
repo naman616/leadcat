@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
     "db:seed": "tsx scripts/seed.ts",
+    "ad-spend:setup-system-user": "tsx scripts/setup-ad-spend-sync-system-user.ts",
     "test:db:setup": "tsx scripts/apply-test-schema.ts",
     "test": "vitest run"
   },

@@ -25,16 +25,13 @@ tables from real ad accounts... blocked on real vendor credentials."
 - `listAdDailyStats` — read-side, for whatever report consumes this later
   (issue #40, cost-per-lead/cost-per-booking leaderboard).
 
-**Deferred — see "Open question for you" below, this is the one that
-actually matters:**
+**Originally deferred, now resolved — see "What runs this nightly" below:**
 
-- **What calls `syncAdSpend` nightly.** This slice ships the sync logic
-  itself as a normal admin-triggered `createServerFn` — it does not decide
-  or build *how* it runs on a schedule. CLAUDE.md is explicit that
-  background jobs are "none yet... flag if a feature seems to need one —
-  don't reach for Inngest or any queue prematurely," and picking a
-  scheduler is exactly the kind of stack decision that section asks to be
-  discussed first, not decided mid-implementation. See below.
+- **What calls `syncAdSpend` nightly.** Vercel Cron + a fixed per-org
+  system account, not a new background-job system — CLAUDE.md's "don't
+  reach for Inngest or any queue prematurely" still applies, and one
+  cron-triggered HTTP route firing once a day per environment doesn't need
+  one.
 
 **Also deferred (smaller, same shape as `05-ad-attribution.md`'s own
 deferrals):**
@@ -103,24 +100,48 @@ after this slice's own migration file was already written. This one has
 **not** been applied anywhere but validated via `prisma validate` +
 `db:generate`.
 
-## Open question for you: what actually runs this nightly?
+## What runs this nightly — resolved
 
-This is the one decision this slice deliberately does not make.
-`syncAdSpend` is written as a plain admin-triggered action (call it, it
-syncs one ad account, once). Turning that into "runs automatically every
-night for every ad account" needs one of:
+This app deploys on Vercel, so the nightly trigger is a Vercel Cron Job
+(`vercel.json`) hitting `POST /api/cron/sync-ad-spend` once a day (`0 2 * *
+*`, 2am UTC — arbitrary, adjust to taste). See
+`src/lib/ad-spend/cron-handler.ts`.
 
-- A scheduled serverless function (Vercel Cron, if this deploys there) that
-  calls `syncAdSpend` for every `ad_account` once a day.
-- A lightweight external cron (e.g. GitHub Actions on a schedule, or an
-  outside uptime-ping-style service) hitting an authenticated endpoint that
-  fans out to every ad account.
-- A real background-job system (Inngest, a queue) — the heavier option
-  CLAUDE.md says not to reach for prematurely, and probably overkill for
-  "call one function once a day per org."
+The part that isn't just "pick a scheduler": `syncAdSpend`'s write is
+RLS-gated to org admins, and a cron invocation has no logged-in user to be
+one. Two ways to give it that authority were considered:
 
-No answer is baked into this PR. Whichever you pick, the actual sync logic
-(`syncAdSpend`) doesn't need to change — only what calls it and how often.
+- **Service-role bypass** — the cron route uses the admin (service-role)
+  Supabase client directly, like `signUp()`'s org creation does. Rejected:
+  that client is meant to stay "the one audited admin path" (CLAUDE.md);
+  giving a second, recurring code path the same bypass — for tenant data
+  writes, not just pre-membership bootstrapping — is exactly the kind of
+  quiet scope creep that rule exists to prevent.
+- **Fixed per-org system account (chosen)** — a real Supabase Auth user
+  (`scripts/setup-ad-spend-sync-system-user.ts`, run once per environment)
+  seated as an `admin` `org_members` row in every org. The cron calls
+  `runAdSpendSync` (the plain function `syncAdSpend` now delegates to)
+  through `withUserContext(systemUserId, ...)` — the exact same path every
+  other admin write in this app already goes through. Zero new RLS bypass
+  surface; the cron is authorized by data (a membership row), not code.
+
+New orgs get the system account automatically: `signUp()` seats it
+alongside the new owner, in the same service-role call that already creates
+the org (see `src/lib/auth.server.ts`) — not a new bypass, the existing one
+doing one more insert.
+
+Auth gating on the route itself: `CRON_SECRET`, compared against
+`Authorization: Bearer <token>` — Vercel sends that header automatically
+for its own Cron Job invocations once `CRON_SECRET` is set in the project's
+env vars. See `.env.example` for both new env vars
+(`CRON_SECRET`, `AD_SPEND_SYNC_SYSTEM_USER_ID`).
+
+**Not applied anywhere yet**: this needs `scripts/setup-ad-spend-sync-
+system-user.ts` run once against the real Supabase project (creates a real
+Auth user + writes `org_members` rows — same "explicit sign-off" bar as
+applying a migration, per CLAUDE.md's review gates) before
+`AD_SPEND_SYNC_SYSTEM_USER_ID`/`CRON_SECRET` can be set in Vercel and the
+cron can actually run.
 
 ## Testing plan
 
@@ -129,7 +150,16 @@ No answer is baked into this PR. Whichever you pick, the actual sync logic
   and the parent `ad_accounts` lookup `syncAdSpend` itself depends on), a
   full `syncAdSpend`-shaped run against the mock provider asserting 28 rows
   get upserted, and a dedicated re-sync test proving the upsert overwrites
-  an existing day's row rather than duplicating it.
+  an existing day's row rather than duplicating it. Still a hand-mirrored
+  copy of `runAdSpendSync`'s body, same as before the refactor — that
+  function goes through `db.server.ts`'s shared `prisma` (bound to
+  `DATABASE_URL`, the real Supabase project), which this test file's
+  `TEST_DATABASE_URL`-bound client deliberately never touches.
+- `tests/ad-spend-cron-handler.test.ts`: `handleAdSpendSyncCron`'s auth
+  gating (missing/wrong `CRON_SECRET`, missing `AD_SPEND_SYNC_SYSTEM_USER_ID`).
+  Doesn't exercise the fan-out loop itself end-to-end — same DATABASE_URL/
+  TEST_DATABASE_URL split as above means that needs a real Supabase-shaped
+  environment, not this test DB.
 - `bun run typecheck` — clean.
 - `bun run lint` — 0 errors (7 pre-existing warnings, unrelated).
 - `bun run test:db:setup` / `bun run test` — **not run this session**, no

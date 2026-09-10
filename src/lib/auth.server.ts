@@ -66,6 +66,26 @@ export const signUp = createServerFn({ method: "POST" })
       throw new Error(memberError.message);
     }
 
+    // Also seat the ad-spend-sync system account (docs/specs/10-ad-spend-sync.md)
+    // as an org admin, so the nightly cron can sync this org's ad accounts
+    // the same way any other org admin's syncAdSpend call would — same
+    // service-role bypass this function already uses for org creation
+    // itself, not a new one. Unset until scripts/setup-ad-spend-sync-system-
+    // user.ts has been run for this environment (e.g. fresh local/dev), so
+    // skip rather than fail signup when it's missing.
+    const systemUserId = process.env["AD_SPEND_SYNC_SYSTEM_USER_ID"];
+    if (systemUserId) {
+      const { error: systemMemberError } = await admin
+        .from("org_members")
+        .insert({ org_id: org["id"], user_id: systemUserId, role: "admin" });
+      if (systemMemberError) {
+        console.error(
+          "[signUp] failed to add ad-spend-sync system user to new org:",
+          systemMemberError,
+        );
+      }
+    }
+
     return { userId, orgId: org["id"] as string };
   });
 

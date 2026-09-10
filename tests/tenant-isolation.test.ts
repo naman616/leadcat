@@ -1066,13 +1066,16 @@ describe("ad spend sync (ad_daily_stats)", () => {
     ).rejects.toThrow(/row-level security/);
   });
 
-  // Mirrors src/lib/ad-spend.server.ts's syncAdSpend exactly, including its
-  // bulk INSERT ... ON CONFLICT (not a per-row ORM upsert loop) — a plain
-  // upsert loop here would pass even if the real raw-SQL statement were
-  // broken. syncAdSpend itself is a createServerFn (needs a real request
-  // context this test file doesn't have), same precedent as
-  // exportLeadsCsv/sendWhatsAppMessage above for replicating a handler body
-  // via asUser rather than calling the server function directly.
+  // Mirrors src/lib/ad-spend.server.ts's runAdSpendSync exactly, including
+  // its bulk INSERT ... ON CONFLICT (not a per-row ORM upsert loop) — a
+  // plain upsert loop here would pass even if the real raw-SQL statement
+  // were broken. Can't call runAdSpendSync directly even though it's a
+  // plain function now (not a createServerFn): it goes through
+  // src/lib/db.server.ts's shared `prisma`, which is bound to DATABASE_URL
+  // (the real Supabase project), not this file's TEST_DATABASE_URL-bound
+  // `prisma` — same reason exportLeadsCsv/sendWhatsAppMessage above
+  // replicate their handler bodies via asUser rather than calling the real
+  // function.
   async function runSyncAdSpend(
     account: { orgId: string; externalAccountId: string },
     adId: string,

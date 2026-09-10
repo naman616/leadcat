@@ -4,6 +4,7 @@ import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleMetaLeadsWebhook } from "./lib/meta-lead-ads/webhook-handler";
 import { handleWhatsAppWebhook } from "./lib/whatsapp/webhook-handler";
+import { handleAdSpendSyncCron } from "./lib/ad-spend/cron-handler";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -55,6 +56,9 @@ export default {
       }
       if (url.pathname === "/api/webhooks/whatsapp") {
         return await handleWhatsAppWebhook(request);
+      }
+      if (url.pathname === "/api/cron/sync-ad-spend") {
+        return await handleAdSpendSyncCron(request);
       }
 
       const handler = await getServerEntry();
