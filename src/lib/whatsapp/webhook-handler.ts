@@ -1,5 +1,5 @@
 import { withAnonWhatsAppWebhookContext } from "../db.server";
-import { verifyMetaSignature } from "../meta-lead-ads/verify-signature";
+import { safeEqual, verifyMetaSignature } from "../meta-lead-ads/verify-signature";
 import { whatsappProvider } from "../whatsapp.server";
 
 // ponytail: one hardcoded reply for every org, no per-org template
@@ -43,7 +43,13 @@ function handleVerificationRequest(url: URL): Response {
   const challenge = url.searchParams.get("hub.challenge");
 
   const expectedToken = process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"];
-  if (mode === "subscribe" && expectedToken && token === expectedToken && challenge) {
+  if (
+    mode === "subscribe" &&
+    expectedToken &&
+    token !== null &&
+    safeEqual(token, expectedToken) &&
+    challenge
+  ) {
     return new Response(challenge, { status: 200 });
   }
   return new Response("Forbidden", { status: 403 });

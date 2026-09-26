@@ -54,7 +54,16 @@ export const signUp = createServerFn({ method: "POST" })
       .select()
       .single();
 
+    // Without this, a failure below leaves an auth user who can sign in but
+    // belongs to no org ("You don't belong to an organization yet") with no
+    // way to retry sign-up under the same email.
+    const rollback = async (orgId?: string) => {
+      if (orgId) await admin.from("organizations").delete().eq("id", orgId);
+      await admin.auth.admin.deleteUser(userId);
+    };
+
     if (orgError || !org) {
+      await rollback();
       throw new Error(orgError?.message ?? "Could not create organization");
     }
 
@@ -63,6 +72,7 @@ export const signUp = createServerFn({ method: "POST" })
       .insert({ org_id: org["id"], user_id: userId, role: "owner" });
 
     if (memberError) {
+      await rollback(org["id"] as string);
       throw new Error(memberError.message);
     }
 
