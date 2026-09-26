@@ -1,9 +1,43 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { AlarmClock, AlertTriangle, CalendarClock, CalendarDays, ListChecks } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlarmClock,
+  AlertTriangle,
+  CalendarClock,
+  CalendarDays,
+  ListChecks,
+  Plus,
+} from "lucide-react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/crm/AppShell";
-import { getTasks } from "@/lib/tasks.server";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  completeTask,
+  createTask,
+  getTasks,
+  listTasks,
+  reassignTask,
+  reopenTask,
+} from "@/lib/tasks.server";
+import { listOrgMembers } from "@/lib/org-members.server";
 import { LEAD_STATUS_LABELS, LEAD_STATUS_TONE, type LeadStatusValue } from "@/lib/lead-status";
 import { getFollowUpBucket } from "@/lib/follow-up";
 import { cn } from "@/lib/utils";
@@ -44,6 +78,8 @@ function TasksPage() {
   return (
     <AppShell title="Tasks">
       <div className="space-y-5">
+        <MyTasks />
+
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <Stat
             label="Escalated"
@@ -111,6 +147,189 @@ function TasksPage() {
         )}
       </div>
     </AppShell>
+  );
+}
+
+type RealTask = Awaited<ReturnType<typeof listTasks>>[number];
+
+const UNASSIGNED = "none";
+
+function MyTasks() {
+  const queryClient = useQueryClient();
+  const [newOpen, setNewOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [assignee, setAssignee] = useState(UNASSIGNED);
+
+  const tasksQuery = useQuery({ queryKey: ["my-tasks"], queryFn: () => listTasks() });
+  const membersQuery = useQuery({ queryKey: ["org-members"], queryFn: () => listOrgMembers() });
+  const members = (membersQuery.data ?? []).map((m) => ({
+    id: m.user.id,
+    name: m.user.fullName ?? m.user.email,
+  }));
+
+  const onSuccess = () => void queryClient.invalidateQueries({ queryKey: ["my-tasks"] });
+  const onError = (err: unknown) =>
+    toast.error(err instanceof Error ? err.message : "Could not update task");
+
+  const createMutation = useMutation({
+    mutationFn: createTask,
+    onSuccess: () => {
+      onSuccess();
+      setNewOpen(false);
+      toast.success("Task created");
+    },
+    onError,
+  });
+  const completeMutation = useMutation({ mutationFn: completeTask, onSuccess, onError });
+  const reopenMutation = useMutation({ mutationFn: reopenTask, onSuccess, onError });
+  const reassignMutation = useMutation({ mutationFn: reassignTask, onSuccess, onError });
+
+  const tasks = tasksQuery.data ?? [];
+  const open = tasks.filter((t) => !t.completedAt);
+  const done = tasks.filter((t) => t.completedAt);
+
+  const assigneeSelect = (value: string, onChange: (v: string) => void, id?: string) => (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id} className="h-8 w-40" aria-label="Assignee">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>
+        {members.map((m) => (
+          <SelectItem key={m.id} value={m.id}>
+            {m.name}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
+  const row = (t: RealTask) => (
+    <li key={t.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
+      <Checkbox
+        aria-label={t.completedAt ? `Reopen ${t.title}` : `Complete ${t.title}`}
+        checked={!!t.completedAt}
+        disabled={completeMutation.isPending || reopenMutation.isPending}
+        onCheckedChange={(checked) =>
+          (checked ? completeMutation : reopenMutation).mutate({ data: { taskId: t.id } })
+        }
+      />
+      <div className="min-w-0 flex-1">
+        <p className={cn("font-semibold", t.completedAt && "text-muted-foreground line-through")}>
+          {t.title}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {t.lead ? (
+            <Link to="/leads" search={{ leadId: t.lead.id }} className="hover:underline">
+              {t.lead.contact.fullName}
+            </Link>
+          ) : (
+            "No lead"
+          )}
+          {t.dueAt && (
+            <span
+              className={cn(!t.completedAt && new Date(t.dueAt) < new Date() && "text-destructive")}
+            >
+              {" · Due "}
+              {new Date(t.dueAt).toLocaleString()}
+            </span>
+          )}
+        </p>
+      </div>
+      {assigneeSelect(t.assignedTo ?? UNASSIGNED, (v) =>
+        reassignMutation.mutate({
+          data: { taskId: t.id, assignedTo: v === UNASSIGNED ? null : v },
+        }),
+      )}
+    </li>
+  );
+
+  return (
+    <section className="rounded-2xl border border-border bg-card shadow-[var(--shadow-card)]">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h2 className="text-sm font-semibold">My tasks ({open.length})</h2>
+        <Button size="sm" onClick={() => setNewOpen(true)}>
+          <Plus className="size-4" /> New task
+        </Button>
+      </div>
+      {tasksQuery.isError ? (
+        <p className="px-4 py-6 text-sm text-destructive">Couldn't load tasks.</p>
+      ) : open.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-muted-foreground">
+          {tasksQuery.isLoading ? "Loading tasks..." : "Nothing to do."}
+        </p>
+      ) : (
+        <ul className="divide-y divide-border">{open.map(row)}</ul>
+      )}
+      {done.length > 0 && (
+        <details className="border-t border-border">
+          <summary className="cursor-pointer px-4 py-3 text-sm text-muted-foreground">
+            Completed ({done.length})
+          </summary>
+          <ul className="divide-y divide-border">{done.map(row)}</ul>
+        </details>
+      )}
+
+      <Dialog
+        open={newOpen}
+        onOpenChange={(o) => {
+          setNewOpen(o);
+          if (!o) {
+            setTitle("");
+            setDueAt("");
+            setAssignee(UNASSIGNED);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>New task</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="task-title">Title</Label>
+              <Input
+                id="task-title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                disabled={createMutation.isPending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="task-due">Due (optional)</Label>
+              <Input
+                id="task-due"
+                type="datetime-local"
+                value={dueAt}
+                onChange={(e) => setDueAt(e.target.value)}
+                disabled={createMutation.isPending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="task-assignee">Assignee</Label>
+              {assigneeSelect(assignee, setAssignee, "task-assignee")}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              disabled={createMutation.isPending || !title.trim()}
+              onClick={() =>
+                createMutation.mutate({
+                  data: {
+                    title: title.trim(),
+                    dueAt: dueAt ? new Date(dueAt).toISOString() : undefined,
+                    assignedTo: assignee === UNASSIGNED ? undefined : assignee,
+                  },
+                })
+              }
+            >
+              {createMutation.isPending ? "Creating..." : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
   );
 }
 
