@@ -11,6 +11,7 @@ import {
   History,
   Mail,
   MessageCircle,
+  MessageSquare,
   Pencil,
   Phone,
   Search,
@@ -50,6 +51,8 @@ import {
 } from "@/lib/leads.server";
 import { sendWhatsAppMessage } from "@/lib/whatsapp.server";
 import { initiateClickToCall } from "@/lib/telephony.server";
+import { sendSms } from "@/lib/sms.server";
+import { sendEmail } from "@/lib/email.server";
 import { listOrgMembers } from "@/lib/org-members.server";
 import { getCurrentUser } from "@/lib/auth.server";
 import {
@@ -921,6 +924,11 @@ function LeadPreview({
   const [noteText, setNoteText] = useState("");
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [whatsappBody, setWhatsappBody] = useState("");
+  const [smsOpen, setSmsOpen] = useState(false);
+  const [smsBody, setSmsBody] = useState("");
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
   const [callOpen, setCallOpen] = useState(false);
   const [agentPhoneNumber, setAgentPhoneNumber] = useState(() =>
     typeof window === "undefined" ? "" : (localStorage.getItem("leadcat:agentPhoneNumber") ?? ""),
@@ -988,6 +996,26 @@ function LeadPreview({
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not send message"),
   });
 
+  const smsMutation = useMutation({
+    mutationFn: sendSms,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      setSmsOpen(false);
+      toast.success("SMS sent");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not send SMS"),
+  });
+
+  const emailMutation = useMutation({
+    mutationFn: sendEmail,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lead", leadId] });
+      setEmailOpen(false);
+      toast.success("Email sent");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not send email"),
+  });
+
   const callMutation = useMutation({
     mutationFn: initiateClickToCall,
     onSuccess: (_result, variables) => {
@@ -1034,6 +1062,8 @@ function LeadPreview({
                     [Pencil, "Edit"],
                     [History, "History"],
                     [MessageCircle, "WhatsApp"],
+                    [MessageSquare, "SMS"],
+                    [Mail, "Email"],
                     [Phone, "Call"],
                   ] as const
                 ).map(([Icon, label]) => (
@@ -1044,9 +1074,13 @@ function LeadPreview({
                     onClick={() =>
                       label === "WhatsApp"
                         ? setWhatsappOpen(true)
-                        : label === "Call"
-                          ? setCallOpen(true)
-                          : toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)
+                        : label === "SMS"
+                          ? setSmsOpen(true)
+                          : label === "Email"
+                            ? setEmailOpen(true)
+                            : label === "Call"
+                              ? setCallOpen(true)
+                              : toast.success(`${label} — ${lead?.contact.fullName ?? ""}`)
                     }
                     className="grid size-8 place-items-center rounded-md bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                   >
@@ -1350,6 +1384,101 @@ function LeadPreview({
               disabled={whatsappMutation.isPending || !whatsappBody.trim() || !lead?.contact.phone}
             >
               {whatsappMutation.isPending ? "Sending..." : "Send"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={smsOpen}
+        onOpenChange={(open) => {
+          setSmsOpen(open);
+          if (!open) setSmsBody("");
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>SMS {lead?.contact.fullName}</DialogTitle>
+            <DialogDescription>
+              Sends to {lead?.contact.phone ?? "this lead"} and logs it on the timeline.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={smsBody}
+            onChange={(e) => setSmsBody(e.target.value)}
+            placeholder="Type a message..."
+            rows={4}
+            disabled={smsMutation.isPending}
+          />
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                if (!lead?.contact.phone || !smsBody.trim()) return;
+                smsMutation.mutate({
+                  data: { leadId: lead.id, toNumber: lead.contact.phone, body: smsBody.trim() },
+                });
+              }}
+              disabled={smsMutation.isPending || !smsBody.trim() || !lead?.contact.phone}
+            >
+              {smsMutation.isPending ? "Sending..." : "Send"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={emailOpen}
+        onOpenChange={(open) => {
+          setEmailOpen(open);
+          if (!open) {
+            setEmailSubject("");
+            setEmailBody("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Email {lead?.contact.fullName}</DialogTitle>
+            <DialogDescription>
+              {lead?.contact.email
+                ? `Sends to ${lead.contact.email} and logs it on the timeline.`
+                : "This lead has no email address."}
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={emailSubject}
+            onChange={(e) => setEmailSubject(e.target.value)}
+            placeholder="Subject"
+            disabled={emailMutation.isPending}
+          />
+          <Textarea
+            value={emailBody}
+            onChange={(e) => setEmailBody(e.target.value)}
+            placeholder="Write your email..."
+            rows={6}
+            disabled={emailMutation.isPending}
+          />
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                if (!lead?.contact.email || !emailSubject.trim() || !emailBody.trim()) return;
+                emailMutation.mutate({
+                  data: {
+                    leadId: lead.id,
+                    toAddress: lead.contact.email,
+                    subject: emailSubject.trim(),
+                    body: emailBody.trim(),
+                  },
+                });
+              }}
+              disabled={
+                emailMutation.isPending ||
+                !emailSubject.trim() ||
+                !emailBody.trim() ||
+                !lead?.contact.email
+              }
+            >
+              {emailMutation.isPending ? "Sending..." : "Send"}
             </Button>
           </DialogFooter>
         </DialogContent>
