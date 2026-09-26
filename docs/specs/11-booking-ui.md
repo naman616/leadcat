@@ -74,7 +74,7 @@ hand.
   - Milestone table with paid/due amounts and a "Record payment" action
     (`recordPayment`).
 - **Overdue display:** a milestone whose `dueDate` is past and which is not
-  `paid` is *displayed* as overdue in the UI. The stored status is never
+  `paid` is _displayed_ as overdue in the UI. The stored status is never
   changed, per the `06-booking.md` deferral (no scheduler exists).
 
 ## Phase 3 — Demand letters
