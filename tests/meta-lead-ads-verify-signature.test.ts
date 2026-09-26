@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { verifyMetaSignature } from "../src/lib/meta-lead-ads/verify-signature";
+import { safeEqual, verifyMetaSignature } from "../src/lib/meta-lead-ads/verify-signature";
 
 const SECRET = "test-app-secret";
 
@@ -37,5 +37,14 @@ describe("verifyMetaSignature", () => {
   it("rejects a well-formed but short/malformed hex signature without throwing", () => {
     const body = JSON.stringify({ entry: [] });
     expect(verifyMetaSignature(body, "sha256=abcd", SECRET)).toBe(false);
+  });
+});
+
+describe("safeEqual", () => {
+  it("matches equal strings and rejects different ones, including different lengths", () => {
+    expect(safeEqual("token", "token")).toBe(true);
+    expect(safeEqual("token", "tokeN")).toBe(false);
+    expect(safeEqual("token", "token-longer")).toBe(false);
+    expect(safeEqual("", "x")).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 /**
  * Verifies Meta's X-Hub-Signature-256 header: HMAC-SHA256 of the raw
@@ -28,4 +28,13 @@ export function verifyMetaSignature(
   if (expectedBuf.length !== providedBuf.length) return false;
 
   return timingSafeEqual(expectedBuf, providedBuf);
+}
+
+/**
+ * Constant-time string equality for shared secrets/tokens. Hashing first
+ * gives timingSafeEqual equal-length inputs, so the length doesn't leak.
+ */
+export function safeEqual(a: string, b: string): boolean {
+  const digest = (v: string) => createHash("sha256").update(v).digest();
+  return timingSafeEqual(digest(a), digest(b));
 }

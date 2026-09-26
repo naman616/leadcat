@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { withAnonMetaWebhookContext } from "../db.server";
 import { MockMetaLeadAdsProvider } from "./mock-provider";
 import type { MetaLeadAdsProvider } from "./provider";
-import { verifyMetaSignature } from "./verify-signature";
+import { safeEqual, verifyMetaSignature } from "./verify-signature";
 
 // The one line to change when real Meta Graph API access exists (issue
 // #24) — everything below depends only on MetaLeadAdsProvider.
@@ -61,7 +61,13 @@ function handleVerificationRequest(url: URL): Response {
   const challenge = url.searchParams.get("hub.challenge");
 
   const expectedToken = process.env["META_WEBHOOK_VERIFY_TOKEN"];
-  if (mode === "subscribe" && expectedToken && token === expectedToken && challenge) {
+  if (
+    mode === "subscribe" &&
+    expectedToken &&
+    token !== null &&
+    safeEqual(token, expectedToken) &&
+    challenge
+  ) {
     return new Response(challenge, { status: 200 });
   }
   return new Response("Forbidden", { status: 403 });
