@@ -29,12 +29,20 @@ const stat = (adId: string, spend: number, impressions = 1000, clicks = 100): Ad
   impressions,
   clicks,
 });
-const lead = (adId: string | null, status = "New", firstTouchAdId: string | null = adId): LeadRec => ({
+const lead = (
+  adId: string | null,
+  status = "New",
+  firstTouchAdId: string | null = adId,
+): LeadRec => ({
   adId,
   firstTouchAdId,
   status,
 });
-const booking = (adId: string | null, totalPrice: number, project: string | null = "Tower A"): BookingRec => ({
+const booking = (
+  adId: string | null,
+  totalPrice: number,
+  project: string | null = "Tower A",
+): BookingRec => ({
   adId,
   firstTouchAdId: adId,
   project,
@@ -87,8 +95,18 @@ describe("buildAdRows", () => {
 describe("buildLeaderboard", () => {
   it("sorts by cost per booking ascending, zero-booking ads last ordered by CPL", () => {
     const rows = buildAdRows(
-      [meta("cheapBooking"), meta("pricyBooking"), meta("noBookCheapLead"), meta("noBookPricyLead")],
-      [stat("cheapBooking", 100), stat("pricyBooking", 900), stat("noBookCheapLead", 100), stat("noBookPricyLead", 100)],
+      [
+        meta("cheapBooking"),
+        meta("pricyBooking"),
+        meta("noBookCheapLead"),
+        meta("noBookPricyLead"),
+      ],
+      [
+        stat("cheapBooking", 100),
+        stat("pricyBooking", 900),
+        stat("noBookCheapLead", 100),
+        stat("noBookPricyLead", 100),
+      ],
       [
         lead("cheapBooking"),
         lead("pricyBooking"),
@@ -115,7 +133,12 @@ describe("buildLeaderboard", () => {
 
   it("computes CPL and cost per booking", () => {
     const [row] = buildLeaderboard(
-      buildAdRows([meta("a")], [stat("a", 600)], [lead("a"), lead("a", "Booked"), lead("a")], [booking("a", 1)]),
+      buildAdRows(
+        [meta("a")],
+        [stat("a", 600)],
+        [lead("a"), lead("a", "Booked"), lead("a")],
+        [booking("a", 1)],
+      ),
     );
     expect(row.cpl).toBe(200);
     expect(row.costPerBooking).toBe(600);
@@ -124,12 +147,7 @@ describe("buildLeaderboard", () => {
 
 describe("buildCreativeComparison", () => {
   it("groups by ad set and drops ad sets with a single ad", () => {
-    const rows = buildAdRows(
-      [meta("a", "s1"), meta("b", "s1"), meta("c", "s2")],
-      [],
-      [],
-      [],
-    );
+    const rows = buildAdRows([meta("a", "s1"), meta("b", "s1"), meta("c", "s2")], [], [], []);
     const out = buildCreativeComparison(rows);
     expect(out).toHaveLength(1);
     expect(out[0].adSetId).toBe("s1");
@@ -140,7 +158,11 @@ describe("buildCreativeComparison", () => {
 describe("buildCampaignRoi", () => {
   it("divides booking value by spend and breaks value down by project", () => {
     const ads = [meta("a", "s1", "c1"), meta("b", "s2", "c1")];
-    const bookings = [booking("a", 1000, "Tower A"), booking("b", 500, "Tower B"), booking("a", 500, "Tower A")];
+    const bookings = [
+      booking("a", 1000, "Tower A"),
+      booking("b", 500, "Tower B"),
+      booking("a", 500, "Tower A"),
+    ];
     const rows = buildAdRows(ads, [stat("a", 100), stat("b", 100)], [], bookings);
     const [c1] = buildCampaignRoi(rows, ads, bookings);
     expect(c1).toMatchObject({ campaignId: "c1", spend: 200, bookingValue: 2000, roi: 10 });
@@ -161,7 +183,9 @@ describe("buildCampaignRoi", () => {
     const ads = [meta("a")];
     const bookings = [booking("a", 1000, null)];
     const rows = buildAdRows(ads, [stat("a", 10)], [], bookings);
-    expect(buildCampaignRoi(rows, ads, bookings)[0].byProject).toEqual([{ project: "Unknown", value: 1000 }]);
+    expect(buildCampaignRoi(rows, ads, bookings)[0].byProject).toEqual([
+      { project: "Unknown", value: 1000 },
+    ]);
   });
 });
 
@@ -214,7 +238,12 @@ describe("buildTouchSplit", () => {
   });
 
   it("does not flag tiny counts or agreeing ads", () => {
-    const rows = buildAdRows([meta("a"), meta("b")], [], [lead("a", "New", "b"), lead("a"), lead("a"), lead("a")], []);
+    const rows = buildAdRows(
+      [meta("a"), meta("b")],
+      [],
+      [lead("a", "New", "b"), lead("a"), lead("a"), lead("a")],
+      [],
+    );
     const byId = Object.fromEntries(buildTouchSplit(rows).map((r) => [r.adId, r]));
     expect(byId.b.disagrees).toBe(false);
   });

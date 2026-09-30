@@ -139,7 +139,8 @@ function withCosts(r: AdRow): LeaderboardRow {
 /** Cost per booking ascending; ads with no bookings last, ordered by CPL (null CPL last of all). */
 export function buildLeaderboard(rows: AdRow[]): LeaderboardRow[] {
   return rows.map(withCosts).sort((a, b) => {
-    if (a.costPerBooking !== null && b.costPerBooking !== null) return a.costPerBooking - b.costPerBooking;
+    if (a.costPerBooking !== null && b.costPerBooking !== null)
+      return a.costPerBooking - b.costPerBooking;
     if (a.costPerBooking !== null) return -1;
     if (b.costPerBooking !== null) return 1;
     if (a.cpl !== null && b.cpl !== null) return a.cpl - b.cpl;
@@ -151,7 +152,10 @@ export function buildLeaderboard(rows: AdRow[]): LeaderboardRow[] {
 
 /** Ads grouped by ad set (targeting held constant); ad sets with one ad have nothing to compare. */
 export function buildCreativeComparison(rows: AdRow[]) {
-  const sets = new Map<string, { adSetId: string; adSetName: string; campaignName: string; rows: AdRow[] }>();
+  const sets = new Map<
+    string,
+    { adSetId: string; adSetName: string; campaignName: string; rows: AdRow[] }
+  >();
   for (const r of rows) {
     const set = sets.get(r.adSetId) ?? {
       adSetId: r.adSetId,
@@ -172,7 +176,11 @@ export function buildCreativeComparison(rows: AdRow[]) {
     }));
 }
 
-export function buildCampaignRoi(rows: AdRow[], ads: AdMeta[], bookings: BookingRec[]): CampaignRoiRow[] {
+export function buildCampaignRoi(
+  rows: AdRow[],
+  ads: AdMeta[],
+  bookings: BookingRec[],
+): CampaignRoiRow[] {
   const campaignOfAd = new Map(ads.map((a) => [a.adId, a.campaignId]));
   const out = new Map<string, CampaignRoiRow>();
   for (const r of rows) {
@@ -212,7 +220,10 @@ export function buildFunnel(rows: AdRow[]): FunnelStep[] {
   const bookings = sum((r) => r.bookings);
   // Bookings are keyed by booking date, site visits by lead creation date, so
   // bookings can exceed site visits; clamp so the funnel never widens.
-  const siteVisits = Math.max(sum((r) => r.siteVisits), bookings);
+  const siteVisits = Math.max(
+    sum((r) => r.siteVisits),
+    bookings,
+  );
   const steps: [string, number][] = [
     ["Impressions", sum((r) => r.impressions)],
     ["Clicks", sum((r) => r.clicks)],

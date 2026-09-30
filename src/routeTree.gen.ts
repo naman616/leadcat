@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdAccountsRouteImport } from './routes/ad-accounts'
+import { Route as AdReportsRouteImport } from './routes/ad-reports'
 import { Route as AttendanceRouteImport } from './routes/attendance'
 import { Route as DataRouteImport } from './routes/data'
 import { Route as GlobalConfigRouteImport } from './routes/global-config'
@@ -33,6 +34,11 @@ const IndexRoute = IndexRouteImport.update({
 const AdAccountsRoute = AdAccountsRouteImport.update({
   id: '/ad-accounts',
   path: '/ad-accounts',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdReportsRoute = AdReportsRouteImport.update({
+  id: '/ad-reports',
+  path: '/ad-reports',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AttendanceRoute = AttendanceRouteImport.update({
@@ -104,6 +110,7 @@ const TeamRoute = TeamRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/ad-accounts': typeof AdAccountsRoute
+  '/ad-reports': typeof AdReportsRoute
   '/attendance': typeof AttendanceRoute
   '/data': typeof DataRoute
   '/global-config': typeof GlobalConfigRoute
@@ -121,6 +128,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/ad-accounts': typeof AdAccountsRoute
+  '/ad-reports': typeof AdReportsRoute
   '/attendance': typeof AttendanceRoute
   '/data': typeof DataRoute
   '/global-config': typeof GlobalConfigRoute
@@ -139,6 +147,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/ad-accounts': typeof AdAccountsRoute
+  '/ad-reports': typeof AdReportsRoute
   '/attendance': typeof AttendanceRoute
   '/data': typeof DataRoute
   '/global-config': typeof GlobalConfigRoute
@@ -158,6 +167,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/ad-accounts'
+    | '/ad-reports'
     | '/attendance'
     | '/data'
     | '/global-config'
@@ -175,6 +185,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/ad-accounts'
+    | '/ad-reports'
     | '/attendance'
     | '/data'
     | '/global-config'
@@ -192,6 +203,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/ad-accounts'
+    | '/ad-reports'
     | '/attendance'
     | '/data'
     | '/global-config'
@@ -210,6 +222,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdAccountsRoute: typeof AdAccountsRoute
+  AdReportsRoute: typeof AdReportsRoute
   AttendanceRoute: typeof AttendanceRoute
   DataRoute: typeof DataRoute
   GlobalConfigRoute: typeof GlobalConfigRoute
@@ -239,6 +252,13 @@ declare module '@tanstack/react-router' {
       path: '/ad-accounts'
       fullPath: '/ad-accounts'
       preLoaderRoute: typeof AdAccountsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ad-reports': {
+      id: '/ad-reports'
+      path: '/ad-reports'
+      fullPath: '/ad-reports'
+      preLoaderRoute: typeof AdReportsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/attendance': {
@@ -338,6 +358,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdAccountsRoute: AdAccountsRoute,
+  AdReportsRoute: AdReportsRoute,
   AttendanceRoute: AttendanceRoute,
   DataRoute: DataRoute,
   GlobalConfigRoute: GlobalConfigRoute,

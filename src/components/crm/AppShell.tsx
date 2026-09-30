@@ -40,6 +40,7 @@ const nav = [
   { to: "/data", label: "Data", icon: Database },
   { to: "/invoice", label: "Invoice", icon: ReceiptText },
   { to: "/reports", label: "Reports", icon: PieChart },
+  { to: "/ad-reports", label: "Ad Reports", icon: PieChart },
   { to: "/ad-accounts", label: "Ad Accounts", icon: Megaphone },
   { to: "/projects", label: "Projects", icon: Building2 },
   { to: "/properties", label: "Properties", icon: Home },
