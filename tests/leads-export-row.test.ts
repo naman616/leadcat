@@ -42,3 +42,22 @@ describe("toLeadExportRow", () => {
     expect(toLeadExportRow({ ...lead, assignee: null })[11]).toBe("");
   });
 });
+
+describe("toLeadExportRow phone column", () => {
+  const phone = (p: string) =>
+    toLeadExportRow({ ...lead, contact: { ...lead.contact, phone: p } })[1];
+
+  it.each(["+919876543210", "+91 98765-43210", "+1 (415) 555-0100", "9876543210"])(
+    "keeps the real phone number %j intact",
+    (p) => expect(phone(p)).toBe(p),
+  );
+
+  it.each(["=cmd|' /C calc'!A0", "+cmd|x", "@SUM(1)", "-1+1", "+91=1+1"])(
+    "neutralizes formula payload %j in phone",
+    (p) => expect(phone(p)).toBe(`'${p}`),
+  );
+
+  it("keeps a null phone null", () => {
+    expect(toLeadExportRow({ ...lead, contact: { ...lead.contact, phone: null } })[1]).toBeNull();
+  });
+});
