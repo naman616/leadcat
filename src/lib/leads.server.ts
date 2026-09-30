@@ -5,6 +5,7 @@ import { withUserContext, type Tx } from "./db.server";
 import { requireUserId, requirePrimaryOrgId } from "./current-user.server";
 import { LEAD_STATUS_VALUES } from "./lead-status";
 import { stringifyCsv } from "./csv";
+import { toLeadExportRow } from "./leads-export";
 
 const assigneeSelect = { id: true, fullName: true, email: true } as const;
 const contactSelect = { id: true, fullName: true, phone: true, email: true, city: true } as const;
@@ -101,21 +102,7 @@ export const exportLeadsCsv = createServerFn({ method: "GET" })
       }),
     );
 
-    const rows = leads.map((l) => [
-      l.contact.fullName,
-      l.contact.phone,
-      l.contact.email,
-      l.contact.city,
-      l.status,
-      l.subStatus,
-      l.source,
-      l.subSource,
-      l.project,
-      l.budget,
-      l.requirement,
-      l.assignee?.fullName ?? "",
-      l.createdAt.toISOString(),
-    ]);
+    const rows = leads.map(toLeadExportRow);
 
     return stringifyCsv([LEAD_EXPORT_HEADER, ...rows]);
   });
