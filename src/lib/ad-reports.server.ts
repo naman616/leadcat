@@ -9,6 +9,7 @@ import {
   buildFunnel,
   buildLeaderboard,
   buildTouchSplit,
+  countLeadsByAd,
   findStaleAds,
   type AdMeta,
   type BookingRec,
@@ -36,7 +37,7 @@ export const getAdReport = createServerFn({ method: "GET" })
     const staleFrom = new Date(Date.now() - STALE_WINDOW_DAYS * DAY_MS);
 
     return withUserContext(userId, async (tx) => {
-      const [adRecords, stats, leadRecords, bookingRecords, stats7, leads7Groups] =
+      const [adRecords, stats, leadRecords, bookingRecords, stats7, leads7] =
         await Promise.all([
           tx.ad.findMany({ include: { adSet: { include: { campaign: true } } } }),
           tx.adDailyStat.groupBy({
@@ -63,10 +64,12 @@ export const getAdReport = createServerFn({ method: "GET" })
             where: { date: { gte: staleFrom } },
             _sum: { spend: true },
           }),
-          tx.lead.groupBy({
-            by: ["adId"],
-            where: { createdAt: { gte: staleFrom }, adId: { not: null } },
-            _count: { _all: true },
+          tx.lead.findMany({
+            where: {
+              createdAt: { gte: staleFrom },
+              OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }],
+            },
+            select: { adId: true, firstTouchAdId: true },
           }),
         ]);
 
@@ -100,8 +103,6 @@ export const getAdReport = createServerFn({ method: "GET" })
 
       const spend7: Record<string, number> = {};
       for (const s of stats7) spend7[s.adId] = Number(s._sum.spend ?? 0);
-      const leads7ByAd: Record<string, number> = {};
-      for (const l of leads7Groups) if (l.adId) leads7ByAd[l.adId] = l._count._all;
 
       return {
         leaderboard: buildLeaderboard(rows),
@@ -109,7 +110,7 @@ export const getAdReport = createServerFn({ method: "GET" })
         roi: buildCampaignRoi(rows, ads, bookings),
         funnel: buildFunnel(rows),
         touch: buildTouchSplit(rows),
-        stale: findStaleAds(ads, spend7, leads7ByAd),
+        stale: findStaleAds(ads, spend7, countLeadsByAd(leads7)),
       };
     });
   });

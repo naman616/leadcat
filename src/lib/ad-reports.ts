@@ -254,6 +254,19 @@ export function buildTouchSplit(rows: AdRow[]): TouchRow[] {
   });
 }
 
+/** adId -> leads credited to it, via last touch or first touch (once per lead per ad). */
+export function countLeadsByAd(
+  leads: { adId: string | null; firstTouchAdId: string | null }[],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const l of leads) {
+    for (const id of new Set([l.adId, l.firstTouchAdId])) {
+      if (id) counts[id] = (counts[id] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
 /** Ads still spending with zero leads in the window. Maps are adId -> total over the window. */
 export function findStaleAds(
   ads: AdMeta[],

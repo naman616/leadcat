@@ -8,6 +8,7 @@ import {
   buildFunnel,
   buildLeaderboard,
   buildTouchSplit,
+  countLeadsByAd,
   findStaleAds,
   type AdMeta,
   type AdStat,
@@ -246,6 +247,24 @@ describe("buildTouchSplit", () => {
     );
     const byId = Object.fromEntries(buildTouchSplit(rows).map((r) => [r.adId, r]));
     expect(byId.b.disagrees).toBe(false);
+  });
+});
+
+describe("countLeadsByAd", () => {
+  it("credits a lead to both its last-touch and first-touch ad, once each", () => {
+    const counts = countLeadsByAd([
+      { adId: "a", firstTouchAdId: "a" }, // same ad both ways: counts once
+      { adId: "b", firstTouchAdId: "a" },
+      { adId: null, firstTouchAdId: "c" }, // first-touch only
+    ]);
+    expect(counts).toEqual({ a: 2, b: 1, c: 1 });
+  });
+  it("returns {} for no leads", () => {
+    expect(countLeadsByAd([])).toEqual({});
+  });
+  it("keeps a first-touch-only ad out of the stale list", () => {
+    const counts = countLeadsByAd([{ adId: null, firstTouchAdId: "a" }]);
+    expect(findStaleAds([meta("a")], { a: 50 }, counts)).toEqual([]);
   });
 });
 
