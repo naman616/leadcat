@@ -221,7 +221,7 @@ export function buildFunnel(rows: AdRow[]): FunnelStep[] {
     ["Booked", bookings],
   ];
   return steps.map(([label, value], i) => {
-    const prev = i === 0 ? null : steps[i - 1][1];
+    const prev = steps[i - 1]?.[1] ?? null;
     const drop = prev === null || prev === 0 ? null : Math.max(0, (1 - value / prev) * 100);
     return { label, value, dropOffPct: drop };
   });
