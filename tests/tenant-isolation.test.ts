@@ -1176,6 +1176,62 @@ describe("ad spend sync (ad_daily_stats)", () => {
     );
     expect(seenByA).toBeNull();
   });
+
+  // getAdReport (src/lib/ad-reports.server.ts) reads through these exact
+  // query shapes — nested include, groupBy, attributed-lead scans. Run them
+  // verbatim as each org: the owner must see its own rows (so the queries
+  // aren't vacuously empty) and another org must see none of them.
+  it("ad report query shapes return nothing from another org", async () => {
+    const { ad } = await seedAdAccountWithOneAd(orgA.id, `report-${run}`);
+    await prisma.adDailyStat.create({
+      data: {
+        orgId: orgA.id,
+        adId: ad.id,
+        date: new Date("2026-01-02"),
+        impressions: 10,
+        clicks: 1,
+        spend: "9.00",
+      },
+    });
+    const attributed = await prisma.lead.create({
+      data: { orgId: orgA.id, contactId: contactA.id, adId: ad.id, firstTouchAdId: ad.id },
+    });
+
+    const readAsReport = (userId: string) =>
+      asUser(userId, async (tx) => ({
+        ads: await tx.ad.findMany({ include: { adSet: { include: { campaign: true } } } }),
+        stats: await tx.adDailyStat.groupBy({
+          by: ["adId"],
+          where: { date: { gte: new Date("2026-01-01"), lt: new Date("2026-02-01") } },
+          _sum: { spend: true, impressions: true, clicks: true },
+        }),
+        leads: await tx.lead.findMany({
+          where: { OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }] },
+          select: { id: true, adId: true },
+        }),
+        leadCounts: await tx.lead.groupBy({
+          by: ["adId"],
+          where: { adId: { not: null } },
+          _count: { _all: true },
+        }),
+        bookings: await tx.booking.findMany({
+          select: { totalPrice: true, lead: { select: { adId: true, project: true } } },
+        }),
+      }));
+
+    const seenByA = await readAsReport(userA.id);
+    expect(seenByA.ads.map((a) => a.id)).toContain(ad.id);
+    expect(seenByA.stats.map((s) => s.adId)).toContain(ad.id);
+    expect(seenByA.leads.map((l) => l.id)).toContain(attributed.id);
+    expect(seenByA.leadCounts.map((l) => l.adId)).toContain(ad.id);
+
+    const seenByB = await readAsReport(userB.id);
+    expect(seenByB.ads.map((a) => a.id)).not.toContain(ad.id);
+    expect(seenByB.stats.map((s) => s.adId)).not.toContain(ad.id);
+    expect(seenByB.leads.map((l) => l.id)).not.toContain(attributed.id);
+    expect(seenByB.leadCounts.map((l) => l.adId)).not.toContain(ad.id);
+    expect(seenByB.bookings.every((b) => b.lead.adId !== ad.id)).toBe(true);
+  });
 });
 
 // Issue #22 — public website lead-capture form. This is the first write
