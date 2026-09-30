@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import { AppShell } from "@/components/crm/AppShell";
 import { getAdReport } from "@/lib/ad-reports.server";
-import { stringifyCsv } from "@/lib/csv";
+import { neutralizeFormula, stringifyCsv } from "@/lib/csv";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/ad-reports")({
@@ -69,9 +69,9 @@ function AdReportsPage() {
           "Booking value",
         ],
         ...data.leaderboard.map((r) => [
-          r.adName,
-          r.adSetName,
-          r.campaignName,
+          neutralizeFormula(r.adName),
+          neutralizeFormula(r.adSetName),
+          neutralizeFormula(r.campaignName),
           r.spend,
           r.leads,
           r.siteVisits,

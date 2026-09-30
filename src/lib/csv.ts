@@ -80,3 +80,14 @@ export function stringifyCsv(rows: (string | number | null | undefined)[][]): st
   };
   return rows.map((row) => row.map(escapeField).join(",")).join("\r\n") + "\r\n";
 }
+
+/**
+ * CSV formula-injection guard for text that originates outside the org (e.g.
+ * ad names synced from Meta/Google): a cell starting with = + - @ tab or CR
+ * is executed as a formula by Excel/Sheets, so prefix it with a single quote.
+ * Not applied inside stringifyCsv: the leads export legitimately contains
+ * values like "+91…" that must stay untouched.
+ */
+export function neutralizeFormula(s: string): string {
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
