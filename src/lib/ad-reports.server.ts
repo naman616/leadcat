@@ -37,41 +37,40 @@ export const getAdReport = createServerFn({ method: "GET" })
     const staleFrom = new Date(Date.now() - STALE_WINDOW_DAYS * DAY_MS);
 
     return withUserContext(userId, async (tx) => {
-      const [adRecords, stats, leadRecords, bookingRecords, stats7, leads7] =
-        await Promise.all([
-          tx.ad.findMany({ include: { adSet: { include: { campaign: true } } } }),
-          tx.adDailyStat.groupBy({
-            by: ["adId"],
-            where: { date: { gte: from, lt: toExclusive } },
-            _sum: { spend: true, impressions: true, clicks: true },
-          }),
-          tx.lead.findMany({
-            where: {
-              createdAt: { gte: from, lt: toExclusive },
-              OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }],
-            },
-            select: { adId: true, firstTouchAdId: true, status: true },
-          }),
-          tx.booking.findMany({
-            where: { status: "confirmed", bookingDate: { gte: from, lt: toExclusive } },
-            select: {
-              totalPrice: true,
-              lead: { select: { adId: true, firstTouchAdId: true, project: true } },
-            },
-          }),
-          tx.adDailyStat.groupBy({
-            by: ["adId"],
-            where: { date: { gte: staleFrom } },
-            _sum: { spend: true },
-          }),
-          tx.lead.findMany({
-            where: {
-              createdAt: { gte: staleFrom },
-              OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }],
-            },
-            select: { adId: true, firstTouchAdId: true },
-          }),
-        ]);
+      const [adRecords, stats, leadRecords, bookingRecords, stats7, leads7] = await Promise.all([
+        tx.ad.findMany({ include: { adSet: { include: { campaign: true } } } }),
+        tx.adDailyStat.groupBy({
+          by: ["adId"],
+          where: { date: { gte: from, lt: toExclusive } },
+          _sum: { spend: true, impressions: true, clicks: true },
+        }),
+        tx.lead.findMany({
+          where: {
+            createdAt: { gte: from, lt: toExclusive },
+            OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }],
+          },
+          select: { adId: true, firstTouchAdId: true, status: true },
+        }),
+        tx.booking.findMany({
+          where: { status: "confirmed", bookingDate: { gte: from, lt: toExclusive } },
+          select: {
+            totalPrice: true,
+            lead: { select: { adId: true, firstTouchAdId: true, project: true } },
+          },
+        }),
+        tx.adDailyStat.groupBy({
+          by: ["adId"],
+          where: { date: { gte: staleFrom } },
+          _sum: { spend: true },
+        }),
+        tx.lead.findMany({
+          where: {
+            createdAt: { gte: staleFrom },
+            OR: [{ adId: { not: null } }, { firstTouchAdId: { not: null } }],
+          },
+          select: { adId: true, firstTouchAdId: true },
+        }),
+      ]);
 
       const ads: AdMeta[] = adRecords.map((a) => ({
         adId: a.id,
